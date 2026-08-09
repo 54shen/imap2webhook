@@ -43,16 +43,14 @@ set NEED_FIX=0
 findstr /C:"IMAP_HOST=CHANGE_ME_" ".env" >nul 2>&1 && set NEED_FIX=1
 findstr /C:"IMAP_USER=CHANGE_ME_" ".env" >nul 2>&1 && set NEED_FIX=1
 findstr /C:"IMAP_PWD=CHANGE_ME_" ".env" >nul 2>&1 && set NEED_FIX=1
-REM WEBHOOK is optional when CUSTOM_SENDER is enabled
-findstr /C:"WEBHOOK=CHANGE_ME_" ".env" >nul 2>&1 && (
-    findstr /B /C:"CUSTOM_SENDER=" ".env" >nul 2>&1 || set NEED_FIX=1
-)
+REM CUSTOM_SENDER is the only delivery channel (required)
+findstr /C:"CUSTOM_SENDER=CHANGE_ME_" ".env" >nul 2>&1 && set NEED_FIX=1
 
 if "%NEED_FIX%"=="1" (
     echo.
     echo [WARN] Missing config in .env:
     echo        - IMAP_HOST / IMAP_USER / IMAP_PWD are required
-    echo        - WEBHOOK is required unless CUSTOM_SENDER is enabled
+    echo        - CUSTOM_SENDER is required (path to your push script)
     echo        Edit .env and run again.
     echo.
     pause

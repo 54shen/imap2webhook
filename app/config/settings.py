@@ -51,27 +51,25 @@ class Settings:
         self.IMAP_PWD        = os.environ.get("IMAP_PWD",  "")
         self.IMAP_SSL_VERIFY = _env_bool("IMAP_SSL_VERIFY", True)
         self.IMAP_TIMEOUT    = int(os.environ.get("IMAP_TIMEOUT", "30"))
-        self.WEBHOOK         = os.environ.get("WEBHOOK",   "")
         self.MAILBOX         = os.environ.get("MAILBOX", "INBOX")
         self.PAST_UNSEEN     = _env_bool("PAST_UNSEEN", False)
         self.ATTACH          = _env_bool("ATTACH", True)
         self.FLUSH_DB        = _env_bool("FLUSH_DB", False)
         self.LOG_LEVEL       = os.environ.get("LOG_LEVEL", "INFO").upper()
-        self.WEBHOOK_RETRIES = int(os.environ.get("WEBHOOK_RETRIES", "3"))
+        self.PUSH_RETRIES    = int(os.environ.get("PUSH_RETRIES", "3"))
         self.MAX_ATTACH_MB   = int(os.environ.get("MAX_ATTACH_MB", "10"))
         self.DB_PATH         = os.environ.get("DB_PATH", "/app/data/data.db")
         self.CUSTOM_SENDER   = os.environ.get("CUSTOM_SENDER", "")
         self._validate()
 
     def _validate(self):
+        # 推送只有一条通道:自定义推送脚本(custom_sender.py)
         mandatory = {
             "IMAP_HOST": self.IMAP_HOST,
             "IMAP_USER": self.IMAP_USER,
             "IMAP_PWD":  self.IMAP_PWD,
+            "CUSTOM_SENDER": self.CUSTOM_SENDER,
         }
-        # 用自定义推送脚本时 WEBHOOK 不是必填(脚本可自行决定推送到哪)
-        if not self.CUSTOM_SENDER:
-            mandatory["WEBHOOK"] = self.WEBHOOK
         missing = [name for name, val in mandatory.items() if not val]
         if missing:
             logger.error(

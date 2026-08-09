@@ -10,10 +10,10 @@ imap2webhook 自定义推送脚本模板
 脚本约定(必须遵守):
     - 邮件负载(JSON)通过标准输入(stdin)传入,一次调用处理一封邮件
     - 退出码 0    = 投递成功(服务会把邮件 UID 记入数据库)
-    - 退出码非 0  = 投递失败(服务会按 WEBHOOK_RETRIES 重试;仍失败则
+    - 退出码非 0  = 投递失败(服务会按 PUSH_RETRIES 重试;仍失败则
                    保留该邮件,下次有新邮件或重连时自动补发)
     - 可以用 os.environ 读取环境变量(继承服务进程,包括 .env 里配置的
-      所有项,如 WEBHOOK);也可以自己往 .env 里加私有配置项
+      所有项,如 PUSH_URL);也可以自己往 .env 里加私有配置项
     - 运行脚本的是服务同一个虚拟环境的 Python,可随意 import requests 等依赖
     - 出错时把原因打印到 stderr,服务日志里能看到
 
@@ -32,19 +32,20 @@ def main():
 
     # ============ 在这里写你自己的推送逻辑 ============
 
-    # ---- 示例 1:默认行为 = 原样 POST 到 WEBHOOK,可加自定义请求头 ----
+    # ---- 示例 1:默认行为 = 原样 POST 到自定义接口,可加请求头 ----
+    # (PUSH_URL / PUSH_SECRET 是自定义环境变量,可自行加到 .env,脚本继承服务环境变量)
     response = requests.post(
-        os.environ.get("WEBHOOK", ""),
+        os.environ.get("PUSH_URL", ""),
         json=payload,
         timeout=10,
         headers={
-            "X-Api-Key": os.environ.get("WEBHOOK_SECRET", ""),   # 自定义鉴权头
+            "X-Api-Key": os.environ.get("PUSH_SECRET", ""),   # 自定义鉴权头
         },
     )
     if response.status_code >= 400:
-        print(f"webhook returned HTTP {response.status_code}", file=sys.stderr)
+        print(f"push returned HTTP {response.status_code}", file=sys.stderr)
         return 1
-    print(f"webhook returned HTTP {response.status_code}", file=sys.stderr)
+    print(f"push returned HTTP {response.status_code}", file=sys.stderr)
 
     # ---- 示例 2:按条件过滤,不想推送的邮件直接返回 0(算成功,不再重试)----
     # if "spam@example.com" in payload.get("from", ""):

@@ -1,5 +1,4 @@
 import logging
-import requests
 import threading
 import time
 from app.config.settings import settings
@@ -104,36 +103,27 @@ class AccountWorker:
                 self.logger.warning("Failed to fetch or parse email [%s]: %s. Will retry later.", uid, e)
                 continue
             self.logger.info("Sending unseen email: [%s] : [%s]", uid, payload.subject)
-            if self.send_to_webhook(payload):
+            if self.send_payload(payload):
                 self.db.insert_uid(uid)
             else:
-                self.logger.error("Webhook delivery failed for email [%s]. UID kept unrecorded, will retry on next trigger.", uid)
+                self.logger.error("Push delivery failed for email [%s]. UID kept unrecorded, will retry on next trigger.", uid)
 
-    def send_to_webhook(self, payload) -> bool:
+    def send_payload(self, payload) -> bool:
         last_error = None
-        for attempt in range(1, settings.WEBHOOK_RETRIES + 1):
+        for attempt in range(1, settings.PUSH_RETRIES + 1):
             try:
-                if self._deliver(payload):
-                    self.logger.info("Webhook delivered on attempt %s.", attempt)
+                if self._run_custom_sender(payload):
+                    self.logger.info("Push delivered on attempt %s.", attempt)
                     return True
                 last_error = "delivery returned failure"
             except Exception as e:
                 last_error = str(e)
-            if attempt < settings.WEBHOOK_RETRIES:
-                self.logger.warning("Webhook attempt %s/%s failed (%s). Retrying in %ss...",
-                                    attempt, settings.WEBHOOK_RETRIES, last_error, 2 ** attempt)
+            if attempt < settings.PUSH_RETRIES:
+                self.logger.warning("Push attempt %s/%s failed (%s). Retrying in %ss...",
+                                    attempt, settings.PUSH_RETRIES, last_error, 2 ** attempt)
                 time.sleep(2 ** attempt)
-        self.logger.error("Webhook failed after %s attempts: %s", settings.WEBHOOK_RETRIES, last_error)
+        self.logger.error("Push failed after %s attempts: %s", settings.PUSH_RETRIES, last_error)
         return False
-
-    def _deliver(self, payload) -> bool:
-        """Delivery strategy: custom sender script if configured, plain POST otherwise."""
-        if settings.CUSTOM_SENDER:
-            return self._run_custom_sender(payload)
-        response = requests.post(settings.WEBHOOK, json=payload.model_dump(by_alias=True), timeout=10)
-        if response.status_code >= 400:
-            raise RuntimeError(f"Webhook returned HTTP {response.status_code}")
-        return True
 
     def _run_custom_sender(self, payload) -> bool:
         """Run the user's custom sender script with the payload JSON on stdin.

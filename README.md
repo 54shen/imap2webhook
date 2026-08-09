@@ -1,6 +1,6 @@
 # imap2webhook
 
-一个轻量级 Docker 服务,用于监听 IMAP 邮箱并将新邮件实时转发到 webhook。之所以构建它,是因为 n8n 自带的 IMAP 节点用起来不如预期。该服务负责「监听 + 结构化转发」部分:把新邮件解析成统一的 JSON 格式 POST 到任意 webhook,另一端(如 n8n、自定义脚本、消息机器人)想怎么处理都行。
+一个轻量级服务,用于监听 IMAP 邮箱并将新邮件实时转发到微信/钉钉等任意目标。之所以构建它,是因为 n8n 自带的 IMAP 节点用起来不如预期。该服务负责「监听 + 结构化转发」部分:把新邮件解析成统一的 JSON 格式交给自定义推送脚本(`sender/custom_sender.py`),脚本想怎么处理都行(推微信、发钉钉、存库……)。
 
 *后续计划:nocodenode 上会增加一个轻量级 FastAPI 用来直接操作 IMAP。*
 
@@ -12,16 +12,16 @@
 - 📦 **结构化 JSON 负载**:自动解析主题、发件人、收件人、时间、纯文本/HTML 正文、附件(附件以 base64 编码);中文主题和正文按声明字符集正确解码
 - 💾 **去重机制**:已处理邮件的 UID 记录在本地 SQLite 数据库中,重启、断线重连都不会重复转发;检测到邮箱重建(UIDVALIDITY 变化)时自动清空记录
 - 🔁 **自动重连**:连接异常时退避重试(10 秒起、封顶 60 秒),断线期间到达的邮件会在重连后补发
-- 🚀 **webhook 失败重试**:发送失败(网络错误或非 2xx)自动重试,仍失败则保留邮件待下次触发时补发,不丢邮件
+- 🚀 **推送失败重试**:发送失败自动重试(2s/4s/8s 退避),仍失败则保留邮件待下次触发时补发,不丢邮件
 - 🔧 **纯配置驱动**:所有行为通过环境变量(或本地 `.env` 文件)控制,无需改代码
 
 ## 工作流程
 
 ```
-┌──────────────┐     ┌───────────────────────┐     ┌──────────────┐
-│  IMAP 服务器  │◄───►│   imap2webhook 容器    │────►│  你的 webhook │
-│  (邮件)       │     │                       │     │  (n8n 等)     │
-└──────────────┘     └───────────────────────┘     └──────────────┘
+┌──────────────┐     ┌───────────────────────┐     ┌────────────────────────┐
+│  IMAP 服务器  │◄───►│   imap2webhook 服务    │────►│  推送脚本 custom_sender │
+│  (邮件)       │     │                       │     │  (推送到微信/钉钉等)    │
+└──────────────┘     └───────────────────────┘     └────────────────────────┘
                         │
                         ▼
                   SQLite (data.db)
@@ -31,7 +31,7 @@
 1. 启动时连接 IMAP 服务器并登录,选中要监听的邮箱(`MAILBOX`)
 2. 进入 `IDLE` 长连接状态,等待服务器推送新邮件通知
 3. 检测到新邮件(`EXISTS` 通知)后,搜索所有未读邮件 UID
-4. 对每个「不在数据库中的」UID:拉取完整邮件 → 解析成 JSON → POST 到 webhook → 将 UID 写入数据库
+4. 对每个「不在数据库中的」UID:拉取完整邮件 → 解析成 JSON → 交给推送脚本 → 将 UID 写入数据库
 5. 若连接异常,退避等待后重新连接,断线期间到达的邮件会在重连后补发
 
 ### 首次启动行为
@@ -41,7 +41,7 @@
 | 场景 | 行为 |
 |------|------|
 | `PAST_UNSEEN=false`(默认) | 仅把邮箱中已有的未读邮件 UID 登记进数据库,**不转发**,只关注之后到达的新邮件 |
-| `PAST_UNSEEN=true` | 把邮箱中已有的未读邮件**全部转发**到 webhook(数据库已记录的除外) |
+| `PAST_UNSEEN=true` | 把邮箱中已有的未读邮件**全部推送**(数据库已记录的除外) |
 | 断线后重连 | 重连时发现的未读邮件会被转发(视为断线期间到达的邮件) |
 
 ## 目录结构
@@ -50,14 +50,14 @@
 imap2webhook/
 ├── app/                        # 应用主代码
 │   ├── main.py                 # 入口:初始化日志 → 创建 EmailManager → 启动主循环
-│   ├── manager.py              # 核心管理器:主循环、去重、webhook 投递与重试
+│   ├── manager.py              # 核心管理器:主循环、去重、推送与重试(每账户一线程)
 │   ├── sqlitedb.py             # SQLite 封装:邮件 UID 与元数据(UIDVALIDITY)存储
 │   ├── config/                 # 配置模块
 │   │   ├── settings.py         # 从环境变量 / .env 读取配置,并校验必填项
 │   │   └── logger.py           # 日志初始化(级别由 LOG_LEVEL 控制)
 │   └── imap/                   # IMAP 模块
 │       ├── client.py           # ImapClient:连接、选邮箱、搜索/拉取邮件、解析、IDLE 监听
-│       └── schemas.py          # Pydantic 数据模型:Attachment、MessageEnvelope(webhook 负载)
+│       └── schemas.py          # Pydantic 数据模型:Attachment、MessageEnvelope(推送负载)
 ├── sender/                     # 推送脚本(每封邮件独立进程运行,改完即时生效)
 │   ├── custom_sender.py        # 自定义推送脚本(含密钥,不提交;模板见 custom_sender.py.example)
 │   ├── custom_sender.py.example  # 推送脚本模板(可复制的起点)
@@ -88,7 +88,7 @@ imap2webhook/
 - `run()`:主循环。处理 `FLUSH_DB` 清库 → 连接 IMAP → 首次连接分流(见上文「首次启动行为」)→ 进入 `IDLE` 监听;任何异常都会被捕获,日志报错后退避重连(10s 起、封顶 60s)
 - `_check_uidvalidity()`:对比数据库中的 UIDVALIDITY,发现邮箱被重建(UID 会复用)时自动清空 UID 记录
 - `manage_unseens()`:遍历未读 UID,**跳过已在数据库中的**,对新的 UID 依次执行:解析 → 转发 → 登记 UID。单封邮件解析失败不会影响其他邮件,失败项下次触发时自动重试
-- `send_to_webhook()`:向 `WEBHOOK` 发 POST 请求(`timeout=10`),非 2xx 视为失败;按 `WEBHOOK_RETRIES` 退避重试(2s/4s/8s),全部失败返回 `False`,该 UID **不入库**,保留待下次触发补发
+- `send_payload()`:以子进程运行自定义推送脚本(邮件 JSON 从 stdin 传入,**退出码 0** = 投递成功);按 `PUSH_RETRIES` 退避重试(2s/4s/8s),全部失败返回 `False`,该 UID **不入库**,保留待下次触发补发
 
 **app/imap/client.py — IMAP 客户端 `ImapClient`**
 
@@ -102,7 +102,7 @@ imap2webhook/
 
 **app/imap/schemas.py — 数据模型**
 
-用 Pydantic 定义 webhook 负载结构。`MessageEnvelope.from_` 字段通过别名 `from` 输出,保证 JSON 里是标准字段名 `"from"`。
+用 Pydantic 定义推送负载结构。`MessageEnvelope.from_` 字段通过别名 `from` 输出,保证 JSON 里是标准字段名 `"from"`。
 
 **app/sqlitedb.py — SQLite 封装 `SqliteDb`**
 
@@ -113,7 +113,7 @@ imap2webhook/
 
 **app/config/settings.py — 配置**
 
-启动时读取环境变量并加载 `.env`(如有),`IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` 为必填项;`WEBHOOK` 与 `CUSTOM_SENDER` 二选一(配了 CUSTOM_SENDER 则 WEBHOOK 可不填)。缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
+启动时读取环境变量并加载 `.env`(如有),`IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` / `CUSTOM_SENDER` 为必填项,缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
 
 **app/config/logger.py — 日志**
 
@@ -131,9 +131,9 @@ imap2webhook/
 
 不经过服务、直接按 UID 重推指定邮件(与自动推送共用 `custom_sender.py` 的发送逻辑,发送顺序一致)。不会改变邮件状态。用法见文件头注释。
 
-## Webhook 负载格式
+## 推送负载格式
 
-每封新邮件都会向 webhook 发起一次 POST 请求,请求体为以下 JSON:
+每封新邮件都会被解析成以下 JSON,通过 stdin 交给推送脚本(`CUSTOM_SENDER`):
 
 ```json
 {
@@ -214,13 +214,12 @@ imap2webhook/
 | `IMAP_PWD`       | 是       | —                 | 账户密码                                    |
 | `IMAP_SSL_VERIFY`| 否       | `true`            | 设为 `false` 跳过证书校验(自签名证书)      |
 | `IMAP_TIMEOUT`   | 否       | `30`              | IMAP 连接超时(秒)                          |
-| `WEBHOOK`        | 二选一   | —                 | 接收新邮件的 POST 请求的 URL(配了 `CUSTOM_SENDER` 时可不填) |
-| `CUSTOM_SENDER`  | 二选一   | —                 | 自定义推送脚本路径(见下文),设置后不再直接 POST 到 WEBHOOK |
+| `CUSTOM_SENDER`  | 是       | —                 | 自定义推送脚本路径(唯一推送通道,见下文) |
 | `MAILBOX`        | 否       | `INBOX`           | 要监听的邮箱 / 文件夹                       |
 | `PAST_UNSEEN`    | 否       | `false`           | 首次连接时是否转发邮箱中已有的未读邮件       |
 | `ATTACH`         | 否       | `true`            | 是否将附件以 base64 编码包含在负载中         |
 | `MAX_ATTACH_MB`  | 否       | `10`              | 附件大小上限(MB),超过的跳过                |
-| `WEBHOOK_RETRIES`| 否       | `3`               | webhook 失败重试次数(2s/4s/8s 退避)         |
+| `PUSH_RETRIES`   | 否       | `3`               | 推送失败重试次数(2s/4s/8s 退避)            |
 | `FLUSH_DB`       | 否       | `false`           | 为 `true` 时启动时清空数据库中的 UID 记录    |
 | `LOG_LEVEL`      | 否       | `INFO`            | 日志级别(DEBUG / INFO / WARNING / ERROR)    |
 | `DB_PATH`        | 否       | `/app/data/data.db` | SQLite 数据库文件路径(本地运行请改为 `./data/data.db`) |
@@ -263,11 +262,13 @@ services:
     container_name: imap2webhook
     volumes:
       - imap_data:/app/data
+      # 推送脚本含你的密钥,不入镜像,用只读挂载注入
+      - ./sender/custom_sender.py:/app/sender/custom_sender.py:ro
     environment:
       IMAP_HOST: mail.emailhost.com
       IMAP_USER: you@yourdomain.com
       IMAP_PWD: yourpassword
-      WEBHOOK: https://your-n8n/webhook/xyz
+      CUSTOM_SENDER: /app/sender/custom_sender.py
       MAILBOX: INBOX
       PAST_UNSEEN: false
       ATTACH: true
@@ -295,7 +296,7 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt   # Windows
 .venv/bin/pip install -r requirements.txt       # Linux / macOS
 
-# 2. 复制配置文件模板并填写(必填:IMAP_HOST / IMAP_USER / IMAP_PWD;推送通道二选一:WEBHOOK 或 CUSTOM_SENDER)
+# 2. 复制配置文件模板并填写(必填:IMAP_HOST / IMAP_USER / IMAP_PWD / CUSTOM_SENDER)
 copy .env.example .env                          # Windows
 cp .env.example .env                            # Linux / macOS
 
@@ -308,7 +309,7 @@ cp .env.example .env                            # Linux / macOS
 
 ## 自定义推送脚本(CUSTOM_SENDER)
 
-默认行为是「邮件解析成 JSON 后 POST 到 `WEBHOOK`」。如果推送逻辑需要定制(加鉴权头、按发件人过滤、转发到钉钉/企业微信机器人、推给多个地址、加工字段……),可以不写死为 POST,而是交给**你自己的 Python 脚本**处理:
+推送由**你自己的 Python 脚本**完成——每封邮件都会被服务以子进程方式运行一次该脚本,邮件 JSON 从 stdin 传入。推送逻辑(加鉴权头、按发件人过滤、转发到微信/钉钉/企业微信机器人、推给多个地址、加工字段……)全部由脚本决定,改完立即生效,无需重启服务:
 
 1. 复制模板:`copy sender\custom_sender.py.example sender\custom_sender.py`
 2. 在 `.env` 里设置:`CUSTOM_SENDER=./sender/custom_sender.py`
@@ -317,12 +318,10 @@ cp .env.example .env                            # Linux / macOS
 **脚本约定:**
 
 - 服务启动脚本,邮件负载(JSON)通过 **stdin** 传入,一次调用处理一封邮件
-- **退出码 0** = 投递成功 → UID 记入数据库;**退出码非 0** = 失败 → 按 `WEBHOOK_RETRIES` 退避重试,仍失败则保留邮件,下次触发时补发
+- **退出码 0** = 投递成功 → UID 记入数据库;**退出码非 0** = 失败 → 按 `PUSH_RETRIES` 退避重试,仍失败则保留邮件,下次触发时补发
 - 脚本运行在服务同一个虚拟环境的 Python 里,可 `import requests` 等已装依赖
-- 可通过 `os.environ` 读取所有环境变量(包括 `.env` 里自定义的项,如 `WEBHOOK_SECRET`)
+- 可通过 `os.environ` 读取所有环境变量(包括 `.env` 里自定义的项,如 `PUSH_URL`)
 - 出错时把原因打印到 stderr,服务日志里能看到
-
-> 注意:设置 `CUSTOM_SENDER` 后 `WEBHOOK` 不再是必填,但 `WEBHOOK` 仍会作为环境变量传给脚本,可直接在脚本里读取使用。
 
 ## 数据持久化与去重
 
@@ -333,9 +332,9 @@ cp .env.example .env                            # Linux / macOS
 
 ## 注意事项
 
-- **webhook 投递为 at-least-once**:发送失败会自动重试 `WEBHOOK_RETRIES` 次,全部失败时该 UID 不会入库,会在下次新邮件到达或重连时自动补发——极端情况下可能重复投递,建议 webhook 端做幂等处理
+- **推送为 at-least-once**:发送失败会自动重试 `PUSH_RETRIES` 次,全部失败时该 UID 不会入库,会在下次新邮件到达或重连时自动补发——极端情况下可能重复投递,建议接收端做幂等处理
 - **IDLE 每 10 分钟主动刷新**:腾讯企业邮箱实测约 12-13 分钟会到期关闭 IDLE,服务提前到 10 分钟主动结束 IDLE(干净断开)并**立即重连**(不等退避),避免连接状态错乱;断档期到达的邮件由重连后的未读扫描兜底
 - **IDLE 依赖服务器支持**:主流 IMAP 服务器(Gmail、Outlook、自建 Dovecot 等)都支持 `IDLE`,若服务器拒绝该命令,服务会报错并按退避间隔重连
-- **首次连接的行为差异**:默认(`PAST_UNSEEN=false`)时邮箱里已有的旧未读邮件只会被登记、不会转发;如果想一启动就把积压的未读邮件全部推给 webhook,首次启动前设置 `PAST_UNSEEN=true`
+- **首次连接的行为差异**:默认(`PAST_UNSEEN=false`)时邮箱里已有的旧未读邮件只会被登记、不会转发;如果想一启动就把积压的未读邮件全部推送,首次启动前设置 `PAST_UNSEEN=true`
 - **自签名证书**:自建邮件服务器使用自签名证书时,设置 `IMAP_SSL_VERIFY=false`
 - **Docker 镜像以非 root 运行**:若旧版容器以 root 写入过卷数据,升级后注意卷内文件属主需为 UID 1000
