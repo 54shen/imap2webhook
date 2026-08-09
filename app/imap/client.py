@@ -2,9 +2,9 @@ import base64
 import email.header
 import imaplib
 import logging
+import socket
 import time
 import email
-from app.config.settings import settings
 from app.imap.schemas import MessageEnvelope, Attachment
 
 logger = logging.getLogger(__name__)
@@ -16,13 +16,17 @@ class ImapClient:
     Use as a context manager : with ImapClient() as client:
     """
 
-    # Servers typically end IDLE sessions after ~30 minutes of inactivity;
-    # wake up before that and let the caller re-establish a fresh IDLE.
-    IDLE_TIMEOUT_SECONDS = 29 * 60
+    # 主动刷新间隔。实测腾讯企业邮箱约 12-13 分钟会到期关闭 IDLE,
+    # 我们提前到 10 分钟主动结束(发 DONE 干净断开)并立即重连,
+    # 避免每次走"服务器断开"的异常路径(那会带 10s+ 退避延迟)。
+    IDLE_REFRESH_SECONDS = 10 * 60
 
-    def __init__(self):
+    def __init__(self, account=None):
+        self.account = account
         self._conn: imaplib.IMAP4_SSL | None = None
         self.uidvalidity: int | None = None
+        # 日志按账户区分(app.imap.client.work / app.imap.client.default),多账户时一眼分清
+        self.logger = logging.getLogger(f"app.imap.client.{account.name if account else 'default'}")
 
     # ------------------------------------------------------------------
     # Context manager
@@ -40,19 +44,20 @@ class ImapClient:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        logger.debug("Opening IMAP connection to %s:%s", settings.IMAP_HOST, settings.IMAP_PORT)
+        a = self.account
+        self.logger.debug("Opening IMAP connection to %s:%s", a.imap_host, a.imap_port)
         # A connect timeout keeps the service from hanging forever when the server is unreachable.
-        self._conn = imaplib.IMAP4_SSL(settings.IMAP_HOST, settings.IMAP_PORT, timeout=settings.IMAP_TIMEOUT)
-        self._conn.login(settings.IMAP_USER, settings.IMAP_PWD)
-        logger.debug("IMAP login successful for %s", settings.IMAP_USER)
+        self._conn = imaplib.IMAP4_SSL(a.imap_host, a.imap_port, timeout=a.imap_timeout)
+        self._conn.login(a.imap_user, a.imap_pwd)
+        self.logger.debug("IMAP login successful for %s", a.imap_user)
 
     def disconnect(self) -> None:
         if self._conn:
             try:
                 self._conn.logout()
-                logger.debug("IMAP connection closed cleanly")
+                self.logger.debug("IMAP connection closed cleanly")
             except Exception:
-                logger.debug("IMAP connection closed with error (ignored)")
+                self.logger.debug("IMAP connection closed with error (ignored)")
             finally:
                 self._conn = None
 
@@ -67,7 +72,7 @@ class ImapClient:
             raise ValueError(f"Cannot select mailbox '{mailbox}': {data}")
         count = int(data[0])
         self.uidvalidity = self._extract_uidvalidity(mailbox, data)
-        logger.debug("Selected mailbox '%s' (%d messages)", mailbox, count)
+        self.logger.debug("Selected mailbox '%s' (%d messages)", mailbox, count)
         return count
 
     def _extract_uidvalidity(self, mailbox: str, data) -> int | None:
@@ -92,23 +97,23 @@ class ImapClient:
     def fetch_unseen_uids(self):
         status, data = self._conn.uid("search", None, "UNSEEN")
         if status != "OK" or not data or not data[0]:
-            logger.debug("UID SEARCH UNSEEN: 无结果")
+            self.logger.debug("UID SEARCH UNSEEN: 无结果")
             return set()
         uids = set(data[0].split())
-        logger.debug("UID SEARCH UNSEEN: %d 封未读 -> %s", len(uids),
+        self.logger.debug("UID SEARCH UNSEEN: %d 封未读 -> %s", len(uids),
                      b",".join(sorted(uids)).decode()[:200])
         return uids
 
 
     def parse_email(self, uid: str) -> MessageEnvelope:
-        logger.debug("拉取邮件 UID %s (RFC822)", uid)
+        self.logger.debug("拉取邮件 UID %s (RFC822)", uid)
         status, data = self._conn.uid("fetch", uid, "(RFC822)")
         if status != "OK" or not data or data[0] is None:
-            raise ValueError(f"UID {uid} not found in '{settings.MAILBOX}'")
-        logger.debug("邮件 UID %s 拉取完成(%d 字节),开始解析", uid, len(data[0][1]))
+            raise ValueError(f"UID {uid} not found in '{self.account.mailbox}'")
+        self.logger.debug("邮件 UID %s 拉取完成(%d 字节),开始解析", uid, len(data[0][1]))
 
         msg = email.message_from_bytes(data[0][1])
-        payload = MessageEnvelope(uid=uid)
+        payload = MessageEnvelope(uid=uid, account=self.account.name)
         payload.subject = self._decode_header(msg.get("Subject", ""))
         payload.from_ = self._decode_header(msg.get("From", ""))
         payload.to = self._decode_header(msg.get("To", ""))
@@ -146,7 +151,7 @@ class ImapClient:
                 elif not part.is_multipart():
                     # 其余内容一律按附件处理:含内联图片 / CID 图片 / PDF 等
                     # (银行账单等常把正文做成内联图片,不处理会丢正文)
-                    if not settings.ATTACH:
+                    if not self.account.attach:
                         continue
                     filename = part.get_filename()
                     if not filename:
@@ -159,7 +164,7 @@ class ImapClient:
                 payload.text_body = self._decode_body(msg)
             elif content_type == "text/html":
                 payload.html_body = self._decode_body(msg)
-            elif settings.ATTACH:
+            elif self.account.attach:
                 # 整封邮件就是图片 / PDF(无正文文本)
                 self._append_attachment(payload, msg, content_type,
                                         self._default_attachment_name(content_type, 1))
@@ -237,12 +242,12 @@ class ImapClient:
         filename = self._decode_header(filename or "unnamed")
         raw = part.get_payload(decode=True)
         if raw is None:
-            logger.warning("Attachment '%s' could not be decoded, skipping", filename)
+            self.logger.warning("Attachment '%s' could not be decoded, skipping", filename)
             return
-        if settings.MAX_ATTACH_MB and len(raw) > settings.MAX_ATTACH_MB * 1024 * 1024:
-            logger.warning(
+        if self.account.max_attach_mb and len(raw) > self.account.max_attach_mb * 1024 * 1024:
+            self.logger.warning(
                 "Attachment '%s' (%s MB) exceeds MAX_ATTACH_MB=%s, skipping",
-                filename, len(raw) // (1024 * 1024), settings.MAX_ATTACH_MB,
+                filename, len(raw) // (1024 * 1024), self.account.max_attach_mb,
             )
             return
         payload.attachments.append(Attachment(
@@ -254,19 +259,26 @@ class ImapClient:
     # ------------------------------------------------------------------
     # Idle
     # ------------------------------------------------------------------
-    def idle(self) -> bool:
+    def idle(self) -> str:
+        """监听新邮件。
+
+        返回:
+        - "email"   : 有新邮件(EXISTS),IDLE 已干净结束,可直接拉取处理
+        - "refresh" : 到达主动刷新时间(10 分钟),连接已关闭,调用方应立即重连
+        异常:服务器关闭连接等异常情况抛 ConnectionError(调用方按退避重连)
+        """
         # A fresh tag per command: reusing a tag on the same connection is a
         # protocol violation and some servers reject it.
         tag = self._conn._new_tag()
-        logger.debug("Starting IDLE...")
+        self.logger.debug("Starting IDLE...")
         self._conn.send(f"{tag} IDLE\r\n".encode())
 
         response = self._conn.readline()
-        logger.debug("IDLE confirm: %s", response)
+        self.logger.debug("IDLE confirm: %s", response)
         if not response.startswith(b"+"):
             raise RuntimeError(f"Server rejected IDLE: {response}")
 
-        self._conn.socket().settimeout(self.IDLE_TIMEOUT_SECONDS)
+        self._conn.socket().settimeout(self.IDLE_REFRESH_SECONDS)
         idle_started = time.monotonic()
 
         try:
@@ -274,9 +286,9 @@ class ImapClient:
                 line = self._conn.readline()
                 if not line:
                     raise ConnectionError("Server closed the connection")
-                logger.debug("IDLE line: %s", line)
+                self.logger.debug("IDLE line: %s", line)
                 if b"EXISTS" in line:
-                    logger.info("New email detected.")
+                    self.logger.info("New email detected.")
                     self._conn.send(b"DONE\r\n")
                     # Drain the IDLE completion response before issuing new commands
                     while True:
@@ -285,16 +297,33 @@ class ImapClient:
                             raise ConnectionError("Server closed the connection")
                         if b"OK" in line or b"NO" in line or b"BAD" in line:
                             break
-                    return True
+                    return "email"
+        except socket.timeout:
+            # 到达主动刷新时间(10 分钟):干净结束 IDLE 并断开连接,
+            # 由调用方立即重连(不发 DONE 就断开会留下半开会话)。
+            self.logger.info("IDLE auto-refresh after %ss, reconnecting",
+                        round(time.monotonic() - idle_started, 1))
+            try:
+                self._conn.send(b"DONE\r\n")
+                while True:
+                    line = self._conn.readline()
+                    if not line:
+                        break
+                    if b"OK" in line or b"NO" in line or b"BAD" in line:
+                        break
+            except Exception:
+                pass
+            self.disconnect()
+            return "refresh"
         except Exception as e:
-            # Timeout (29 min), server-side close, or interruption: connection state
-            # is undefined. Terminate IDLE and drop the connection so the caller
+            # Server-side close or other interruption: connection state is
+            # undefined. Terminate IDLE and drop the connection so the caller
             # reconnects cleanly instead of reusing a broken session.
-            logger.warning("IDLE interrupted after %ss: %s",
+            self.logger.warning("IDLE interrupted after %ss: %s",
                            round(time.monotonic() - idle_started, 1), e)
             try:
                 self._conn.send(b"DONE\r\n")
             except Exception:
                 pass
             self.disconnect()
-            return False
+            raise ConnectionError("IDLE session ended, reconnecting") from e

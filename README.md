@@ -138,6 +138,7 @@ imap2webhook/
 ```json
 {
   "uid": "1809",
+  "account": "default",
   "subject": "Your invoice is ready",
   "from": "billing@example.com",
   "to": "filter@mydomain.com",
@@ -183,6 +184,7 @@ imap2webhook/
 | 字段 | 说明 |
 |------|------|
 | `uid` | 邮件在邮箱中的唯一标识(字符串) |
+| `account` | 来源账户名(`default` / `1` / `2`...,多账户时区分来源) |
 | `subject` | 主题(RFC 2047 已解码,中文正常) |
 | `from` / `to` / `cc` | 发件人 / 收件人 / 抄送 |
 | `reply_to` / `sender` | 回复地址 / 实际发件人(Sender 头) |
@@ -222,6 +224,32 @@ imap2webhook/
 | `FLUSH_DB`       | 否       | `false`           | 为 `true` 时启动时清空数据库中的 UID 记录    |
 | `LOG_LEVEL`      | 否       | `INFO`            | 日志级别(DEBUG / INFO / WARNING / ERROR)    |
 | `DB_PATH`        | 否       | `/app/data/data.db` | SQLite 数据库文件路径(本地运行请改为 `./data/data.db`) |
+
+## 多账户(同时监听多个邮箱)
+
+在 `.env` 中把账户配置复制一组、编号 +1,即可同时监听多个邮箱:
+
+```ini
+# 账户 0(无前缀,默认)— 始终存在,不能删
+IMAP_HOST=imap.exmail.qq.com
+IMAP_USER=xxx@54shen.cn
+IMAP_PWD=xxx
+
+# 账户 1 — IMAP1_* 前缀
+IMAP1_HOST=imap.qq.com
+IMAP1_USER=xxx@qq.com
+IMAP1_PWD=xxx
+IMAP1_MAILBOX=INBOX        # 可选,未配置继承全局默认
+IMAP1_PAST_UNSEEN=false    # 可选,未配置继承全局默认
+
+# 账户 2 — IMAP2_* 前缀,以此类推
+```
+
+- **编号必须连续**:有 `IMAP1_*` 没有 `IMAP2_*` 时,`IMAP3_*` 及之后的账户不会被加载
+- 未配置的项继承全局默认值(`IMAP_PORT`/`IMAP_TIMEOUT`/`MAILBOX`/`PAST_UNSEEN`/`ATTACH`/`MAX_ATTACH_MB`)
+- 每个账户**独立线程**监听,互不影响:一个账户断线/登录失败只重试它自己
+- 去重按账户隔离(同一 UID 在不同账户互不干扰),历史记录自动迁移到默认账户
+- 每封邮件的 JSON 负载带 `account` 字段(账户名 `default` / `1` / `2`...),推送脚本可据此区分来源
 
 ## 快速开始
 
@@ -300,13 +328,13 @@ cp .env.example .env                            # Linux / macOS
 
 - 每封成功转发的邮件,其 UID 都会写入 SQLite(路径由 `DB_PATH` 指定)
 - 容器部署时数据库文件必须放在**挂载的卷**中,否则容器重建后数据丢失,已处理过的邮件会被重复转发
-- 去重以「UID 是否在数据库中」为准,内存集合加速判断;如需清空历史记录,设置 `FLUSH_DB=true` 重启一次,然后改回 `false`
-- 邮箱被重建(UIDVALIDITY 变化)时自动清空记录,避免 UID 复用导致漏邮件
+- 去重以「(账户, UID) 是否在数据库中」为准,内存集合加速判断;多账户各自独立去重;如需清空历史记录,设置 `FLUSH_DB=true` 重启一次,然后改回 `false`
+- 邮箱被重建(UIDVALIDITY 变化)时自动清空该账户的记录,避免 UID 复用导致漏邮件
 
 ## 注意事项
 
 - **webhook 投递为 at-least-once**:发送失败会自动重试 `WEBHOOK_RETRIES` 次,全部失败时该 UID 不会入库,会在下次新邮件到达或重连时自动补发——极端情况下可能重复投递,建议 webhook 端做幂等处理
-- **IDLE 会话每 29 分钟自动刷新**:无事件时会主动终止 IDLE 并重建连接,避免服务器 30 分钟 IDLE 限制导致连接状态错乱
+- **IDLE 每 10 分钟主动刷新**:腾讯企业邮箱实测约 12-13 分钟会到期关闭 IDLE,服务提前到 10 分钟主动结束 IDLE(干净断开)并**立即重连**(不等退避),避免连接状态错乱;断档期到达的邮件由重连后的未读扫描兜底
 - **IDLE 依赖服务器支持**:主流 IMAP 服务器(Gmail、Outlook、自建 Dovecot 等)都支持 `IDLE`,若服务器拒绝该命令,服务会报错并按退避间隔重连
 - **首次连接的行为差异**:默认(`PAST_UNSEEN=false`)时邮箱里已有的旧未读邮件只会被登记、不会转发;如果想一启动就把积压的未读邮件全部推给 webhook,首次启动前设置 `PAST_UNSEEN=true`
 - **自签名证书**:自建邮件服务器使用自签名证书时,设置 `IMAP_SSL_VERIFY=false`

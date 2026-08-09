@@ -5,12 +5,16 @@ imap2webhook 邮件补发工具
 按 UID 把指定邮件重新推送到微信(与自动推送共用 custom_sender.py 的逻辑)。
 
 用法(在项目根目录下运行):
-    python sender/resend.py list              # 列出邮箱最近的邮件(UID + 日期 + 主题)
-    python sender/resend.py 879               # 推送 UID=879 的邮件
-    python sender/resend.py info 879          # 查看邮件 MIME 结构和解析结果(排查用)
-    python sender/resend.py                   # 不带参数进入交互模式(可连续发送)
+    python sender/resend.py list                    # 列默认账户最近的邮件
+    python sender/resend.py list 1                  # 列账户 1 最近的邮件
+    python sender/resend.py 879                     # 推送默认账户 UID=879 的邮件
+    python sender/resend.py 879 1                   # 推送账户 1 UID=879 的邮件
+    python sender/resend.py info 879                # 查看 MIME 结构和解析结果(默认账户)
+    python sender/resend.py info 879 1              # 同上,账户 1
+    python sender/resend.py                         # 不带参数进入交互模式(可连续发送)
 
 说明:
+- 账户编号与 .env 前缀对应:默认(账户 0,无前缀 IMAP_*)、1(IMAP1_*)、2(IMAP2_*)...
 - 读取 .env 里的 IMAP 配置和 custom_sender.py 的推送配置
 - 不改变邮件状态(不会标记已读、不会移动邮件)
 - 与自动推送的差异:不管数据库记录,指定哪封就发哪封
@@ -25,7 +29,7 @@ import time
 # 但项目根目录(含 app 包)不在其中 —— 手动加进来
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.config.settings import settings
+from app.config.settings import AccountConfig, settings
 from app.imap.client import ImapClient
 
 try:
@@ -34,13 +38,29 @@ except ImportError:
     from sender import custom_sender         # python -m sender.resend 时用包导入
 
 
-def list_recent(count: int = 20) -> None:
+def _resolve_account(account=None) -> AccountConfig:
+    """账户参数 → AccountConfig。None/''/default/0 → 账户 0;数字 → 编号账户;其他按名字匹配。"""
+    if isinstance(account, AccountConfig):
+        return account
+    accounts = settings.load_accounts()
+    if account in (None, "", "default", "0"):
+        return accounts[0]
+    if str(account).isdigit() and int(account) < len(accounts):
+        return accounts[int(account)]
+    for a in accounts:
+        if a.name == str(account):
+            return a
+    raise SystemExit(f"账户 {account!r} 不存在。可用账户: {', '.join(a.name for a in accounts)}")
+
+
+def list_recent(count: int = 20, account=None) -> None:
     """列出邮箱最近的邮件,方便挑选要补发的 UID"""
-    with ImapClient() as client:
-        client.select_mailbox(settings.MAILBOX)
+    account = _resolve_account(account)
+    with ImapClient(account) as client:
+        client.select_mailbox(account.mailbox)
         _, data = client._conn.uid("search", None, "ALL")
         uids = data[0].split()[-count:]
-        print(f"邮箱 {settings.MAILBOX} 最近 {len(uids)} 封邮件:")
+        print(f"邮箱 {account.mailbox}(账户 {account.name}) 最近 {len(uids)} 封邮件:")
         for uid in uids:
             _, fetch = client._conn.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])")
             msg = email.message_from_bytes(fetch[0][1])
@@ -63,23 +83,25 @@ def _dump_mime(msg, indent: int = 0) -> None:
         print("  " * indent + f"{msg.get_content_type():30} | disposition={cd} | filename={fn} | {size}")
 
 
-def show_info(uid: str) -> int:
+def show_info(uid: str, account=None) -> int:
     """查看邮件的 MIME 结构和解析结果(排查为什么没正文/没附件)"""
     if not uid.isdigit():
         print("UID 必须是数字。")
         return 1
-    with ImapClient() as client:
-        client.select_mailbox(settings.MAILBOX)
+    account = _resolve_account(account)
+    with ImapClient(account) as client:
+        client.select_mailbox(account.mailbox)
         status, data = client._conn.uid("fetch", uid, "(RFC822)")
         if status != "OK" or not data or data[0] is None:
             print(f"拉取失败:UID {uid} 不存在。")
             return 1
         msg = email.message_from_bytes(data[0][1])
-        print(f"=== 邮件 {uid} 的 MIME 结构 ===")
+        print(f"=== 邮件 {uid}(账户 {account.name})的 MIME 结构 ===")
         _dump_mime(msg)
         print(f"=== 解析结果 ===")
         payload = client.parse_email(uid)
     data = payload.model_dump(by_alias=True)
+    print(f"账户: {data.get('account')}")
     print(f"主题: {data.get('subject')}")
     print(f"text_body 长度: {len(data.get('text_body') or '')}")
     print(f"html_body 长度: {len(data.get('html_body') or '')}")
@@ -89,13 +111,14 @@ def show_info(uid: str) -> int:
     return 0
 
 
-def send_by_uid(uid: str) -> int:
+def send_by_uid(uid: str, account=None) -> int:
     if not uid.isdigit():
         print("UID 必须是数字。")
         return 1
-    print(f"正在从 {settings.IMAP_HOST} 拉取 UID {uid}...", file=sys.stderr)
-    with ImapClient() as client:
-        client.select_mailbox(settings.MAILBOX)
+    account = _resolve_account(account)
+    print(f"正在从 {account.imap_host}(账户 {account.name})拉取 UID {uid}...", file=sys.stderr)
+    with ImapClient(account) as client:
+        client.select_mailbox(account.mailbox)
         payload = client.parse_email(uid)              # MessageEnvelope
     data = payload.model_dump(by_alias=True)
     print(f"已获取: {data.get('subject')} | {data.get('from')}", file=sys.stderr)
@@ -128,16 +151,19 @@ def send_by_uid(uid: str) -> int:
 
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "list":
-        list_recent()
+        list_recent(account=sys.argv[2] if len(sys.argv) >= 3 else None)
         return 0
     if len(sys.argv) >= 2 and sys.argv[1] == "info":
-        return show_info(sys.argv[2] if len(sys.argv) >= 3 else input("UID> ").strip())
+        uid_arg = sys.argv[2] if len(sys.argv) >= 3 else input("UID> ").strip()
+        return show_info(uid_arg, sys.argv[3] if len(sys.argv) >= 4 else None)
     if len(sys.argv) >= 2:
         # 命令行直接指定 UID:发送一次即退出
-        return send_by_uid(sys.argv[1])
+        return send_by_uid(sys.argv[1], sys.argv[2] if len(sys.argv) >= 3 else None)
 
     # 交互模式:发完一封可以继续选择下一封
-    print("交互模式:输入 UID 发送邮件,list 查看最近邮件,info <UID> 查看邮件详情,quit 退出。")
+    account = _resolve_account(input(f"账户> ").strip() or None)
+    print(f"交互模式:账户 {account.name}。输入 UID 发送邮件,list 查看最近邮件,"
+          f"info <UID> 查看邮件详情,quit 退出。")
     while True:
         try:
             line = input("UID> ").strip()
@@ -150,16 +176,16 @@ def main() -> int:
             return 0
         parts = line.split(maxsplit=1)
         if parts[0].lower() == "list":
-            list_recent()
+            list_recent(account=account)
             continue
         if parts[0].lower() == "info":
             uid_arg = parts[1].strip() if len(parts) > 1 else input("UID> ").strip()
-            show_info(uid_arg)
+            show_info(uid_arg, account)
             continue
         if not line.isdigit():
             print("UID 必须是数字(或输入 list / info / quit)。")
             continue
-        send_by_uid(line)
+        send_by_uid(line, account)
         print()
 
 

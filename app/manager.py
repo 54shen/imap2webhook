@@ -1,5 +1,6 @@
 import logging
 import requests
+import threading
 import time
 from app.config.settings import settings
 from app.imap.client import ImapClient
@@ -7,66 +8,69 @@ from app.sqlitedb import SqliteDb
 
 logger = logging.getLogger(__name__)
 
-class EmailManager:
-    def __init__(self):
-        self.db = SqliteDb(settings.DB_PATH)
+
+class AccountWorker:
+    """单个账户的监听循环:连接 → IDLE → 拉取 → 推送。每账户一个线程。"""
+
+    def __init__(self, account):
+        self.account = account
+        self.logger = logging.getLogger(f"app.manager.{account.name}")
+        self.db = SqliteDb(settings.DB_PATH, account=account.name)
         self.first_connect = True
 
     def run(self):
-        if settings.FLUSH_DB:
-            logger.warning("Database email uids flushed at startup.")
-            self.db.flush_uids()
-
         if len(self.db.email_uids):
-            logger.debug("List of known email uids : %s", self.db.email_uids)
+            self.logger.debug("List of known email uids : %s", self.db.email_uids)
 
         attempt = 0
         while True:
             try:
-                with ImapClient() as client:
-                    client.select_mailbox(settings.MAILBOX)
+                with ImapClient(self.account) as client:
+                    client.select_mailbox(self.account.mailbox)
                     self._check_uidvalidity(client)
                     attempt = 0
 
                     unseens = client.fetch_unseen_uids()
 
                     # If PAST_UNSEEN set to True, and first connection, forward all unseen email
-                    if settings.PAST_UNSEEN and self.first_connect:
+                    if self.account.past_unseen and self.first_connect:
                         if len(unseens):
-                            logger.info("Unseen emails at startup: %s.", len(unseens))
+                            self.logger.info("Unseen emails at startup: %s.", len(unseens))
                             self.manage_unseens(client, unseens)
 
                     # If PAST_UNSEEN set to False, and first connection, register all unseen email to the database
                     elif self.first_connect:
-                        logger.info("Unseen emails at startup: %s. Watching for new ones only.", len(unseens))
+                        self.logger.info("Unseen emails at startup: %s. Watching for new ones only.", len(unseens))
                         for unseen in unseens:
                             uid = int(unseen.decode())
                             # If uid is not already in database
                             if uid not in self.db.email_uids:
                                 self.db.insert_uid(uid)
-                                logger.info("Registered unseen email: [%s]", uid)
+                                self.logger.info("Registered unseen email: [%s]", uid)
 
                     # Not a first connection, forward emails that came during a connection error
                     else:
                         if unseens:
-                            logger.warning("Reconnected. Found %s unseen email(s) during interruption, forwarding.",
-                                           len(unseens))
+                            self.logger.info("Reconnected. Found %s unseen email(s), forwarding.",
+                                             len(unseens))
                         self.manage_unseens(client, unseens)
 
                     self.first_connect = False
 
                     while True:
-                        if not client.idle():
-                            # IDLE 被服务器关闭:2 秒内重连重进,保持实时性
-                            # (避免用轮询——新邮件检测延迟大;IDLE 短盲窗可接受)
-                            time.sleep(2)
-                            raise ConnectionError("IDLE session ended, reconnecting")
-                        unseens = client.fetch_unseen_uids()
-                        self.manage_unseens(client, unseens)
+                        state = client.idle()
+                        if state == "email":
+                            unseens = client.fetch_unseen_uids()
+                            self.manage_unseens(client, unseens)
+                        else:
+                            # state == "refresh":10 分钟主动刷新,干净断开,
+                            # 立即重连不进退避(异常断开在 idle() 里直接抛
+                            # ConnectionError,走外层退避重连,不会到这里)
+                            break
 
             except Exception as e:
                 delay = min(60, 10 * max(attempt, 1))
-                logger.error("Connection error: %s. Reconnecting in %ss...", e, delay)
+                self.logger.error("Connection error: %s. Reconnecting in %ss...", e, delay)
                 attempt += 1
                 time.sleep(delay)
 
@@ -75,50 +79,51 @@ class EmailManager:
         uidvalidity = client.uidvalidity
         if uidvalidity is None:
             return
-        stored = self.db.get_meta("uidvalidity")
+        key = f"{self.account.name}:uidvalidity"
+        stored = self.db.get_meta(key)
         if stored is not None and int(stored) != uidvalidity:
-            logger.warning("UIDVALIDITY changed (%s -> %s): mailbox was rebuilt, flushing UID records.",
-                           stored, uidvalidity)
+            self.logger.warning("UIDVALIDITY changed (%s -> %s): mailbox was rebuilt, flushing UID records.",
+                                stored, uidvalidity)
             self.db.flush_uids()
-        self.db.set_meta("uidvalidity", str(uidvalidity))
+        self.db.set_meta(key, str(uidvalidity))
 
     def manage_unseens(self, client, unseens):
         for unseen in unseens:
             uid = int(unseen.decode())
             # If uid is not already in database
             if uid in self.db.email_uids:
-                logger.debug("UID %s 已在数据库,跳过", uid)
+                self.logger.debug("UID %s 已在数据库,跳过", uid)
                 continue
-            logger.debug("UID %s 待处理:解析 → 推送 → 登记", uid)
+            self.logger.debug("UID %s 待处理:解析 → 推送 → 登记", uid)
             try:
                 payload = client.parse_email(unseen)
             except Exception as e:
                 # Keep the loop alive: a single bad/deleted message must not
                 # take down the whole connection. The UID stays unrecorded and
                 # will be retried on the next trigger.
-                logger.warning("Failed to fetch or parse email [%s]: %s. Will retry later.", uid, e)
+                self.logger.warning("Failed to fetch or parse email [%s]: %s. Will retry later.", uid, e)
                 continue
-            logger.info("Sending unseen email: [%s] : [%s]", uid, payload.subject)
+            self.logger.info("Sending unseen email: [%s] : [%s]", uid, payload.subject)
             if self.send_to_webhook(payload):
                 self.db.insert_uid(uid)
             else:
-                logger.error("Webhook delivery failed for email [%s]. UID kept unrecorded, will retry on next trigger.", uid)
+                self.logger.error("Webhook delivery failed for email [%s]. UID kept unrecorded, will retry on next trigger.", uid)
 
     def send_to_webhook(self, payload) -> bool:
         last_error = None
         for attempt in range(1, settings.WEBHOOK_RETRIES + 1):
             try:
                 if self._deliver(payload):
-                    logger.info("Webhook delivered on attempt %s.", attempt)
+                    self.logger.info("Webhook delivered on attempt %s.", attempt)
                     return True
                 last_error = "delivery returned failure"
             except Exception as e:
                 last_error = str(e)
             if attempt < settings.WEBHOOK_RETRIES:
-                logger.warning("Webhook attempt %s/%s failed (%s). Retrying in %ss...",
-                               attempt, settings.WEBHOOK_RETRIES, last_error, 2 ** attempt)
+                self.logger.warning("Webhook attempt %s/%s failed (%s). Retrying in %ss...",
+                                    attempt, settings.WEBHOOK_RETRIES, last_error, 2 ** attempt)
                 time.sleep(2 ** attempt)
-        logger.error("Webhook failed after %s attempts: %s", settings.WEBHOOK_RETRIES, last_error)
+        self.logger.error("Webhook failed after %s attempts: %s", settings.WEBHOOK_RETRIES, last_error)
         return False
 
     def _deliver(self, payload) -> bool:
@@ -141,7 +146,7 @@ class EmailManager:
         import sys
 
         data = payload.model_dump(by_alias=True)
-        logger.info("Running custom sender script: %s", settings.CUSTOM_SENDER)
+        self.logger.info("Running custom sender script: %s", settings.CUSTOM_SENDER)
         proc = subprocess.run(
             [sys.executable, settings.CUSTOM_SENDER],
             input=json.dumps(data, ensure_ascii=False).encode(),
@@ -149,12 +154,37 @@ class EmailManager:
             timeout=30,
         )
         if proc.stdout:
-            logger.debug("Custom sender stdout: %s", proc.stdout.decode(errors="replace")[:500])
+            self.logger.debug("Custom sender stdout: %s", proc.stdout.decode(errors="replace")[:500])
         if proc.returncode != 0:
-            logger.error(
+            self.logger.error(
                 "Custom sender exited with code %s: %s",
                 proc.returncode,
                 proc.stderr.decode(errors="replace").strip()[:500],
             )
             return False
         return True
+
+
+class EmailManager:
+    """启动器:为每个账户拉起一个监听线程。"""
+
+    def run(self):
+        if settings.FLUSH_DB:
+            logger.warning("Database email uids flushed at startup.")
+            SqliteDb(settings.DB_PATH).flush_uids()
+
+        accounts = settings.load_accounts()
+        logger.info("启动 %d 个账户监听: %s",
+                    len(accounts), ", ".join(a.name for a in accounts))
+
+        threads = []
+        for acct in accounts:
+            # Worker 必须在目标线程内构造:SQLite 连接只能被创建它的线程使用
+            t = threading.Thread(target=lambda: AccountWorker(acct).run(),
+                                 name=f"imap-{acct.name}", daemon=True)
+            t.start()
+            threads.append(t)
+
+        # 主线程挂起;worker 均为 daemon 线程,单个账户异常退出不影响其他账户
+        for t in threads:
+            t.join()

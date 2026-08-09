@@ -10,6 +10,7 @@ class MessageEnvelope(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     uid:            str
+    account:        str = 'default'   # 来源账户名(多账户时用 .env 前缀编号区分)
     subject:        Optional[str] = ''
     from_:          Optional[str] = Field(None, alias="from")
     to:             Optional[str] = None
