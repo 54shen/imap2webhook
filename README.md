@@ -113,7 +113,7 @@ imap2webhook/
 
 **app/config/settings.py — 配置**
 
-启动时读取环境变量并加载 `.env`(如有),`IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` / `WEBHOOK` 为必填项,缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
+启动时读取环境变量并加载 `.env`(如有),`IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` 为必填项;`WEBHOOK` 与 `CUSTOM_SENDER` 二选一(配了 CUSTOM_SENDER 则 WEBHOOK 可不填)。缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
 
 **app/config/logger.py — 日志**
 
@@ -214,8 +214,8 @@ imap2webhook/
 | `IMAP_PWD`       | 是       | —                 | 账户密码                                    |
 | `IMAP_SSL_VERIFY`| 否       | `true`            | 设为 `false` 跳过证书校验(自签名证书)      |
 | `IMAP_TIMEOUT`   | 否       | `30`              | IMAP 连接超时(秒)                          |
-| `WEBHOOK`        | 是       | —                 | 接收新邮件的 POST 请求的 URL                |
-| `CUSTOM_SENDER`  | 否       | —                 | 自定义推送脚本路径(见下文),设置后不再直接 POST 到 WEBHOOK |
+| `WEBHOOK`        | 二选一   | —                 | 接收新邮件的 POST 请求的 URL(配了 `CUSTOM_SENDER` 时可不填) |
+| `CUSTOM_SENDER`  | 二选一   | —                 | 自定义推送脚本路径(见下文),设置后不再直接 POST 到 WEBHOOK |
 | `MAILBOX`        | 否       | `INBOX`           | 要监听的邮箱 / 文件夹                       |
 | `PAST_UNSEEN`    | 否       | `false`           | 首次连接时是否转发邮箱中已有的未读邮件       |
 | `ATTACH`         | 否       | `true`            | 是否将附件以 base64 编码包含在负载中         |
@@ -295,7 +295,7 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt   # Windows
 .venv/bin/pip install -r requirements.txt       # Linux / macOS
 
-# 2. 复制配置文件模板并填写(必填:IMAP_HOST / IMAP_USER / IMAP_PWD / WEBHOOK)
+# 2. 复制配置文件模板并填写(必填:IMAP_HOST / IMAP_USER / IMAP_PWD;推送通道二选一:WEBHOOK 或 CUSTOM_SENDER)
 copy .env.example .env                          # Windows
 cp .env.example .env                            # Linux / macOS
 
