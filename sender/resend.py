@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+"""
+imap2webhook 邮件补发工具
+========================================
+按 UID 把指定邮件重新推送到微信(与自动推送共用 custom_sender.py 的逻辑)。
+
+用法(在项目根目录下运行):
+    python sender/resend.py list              # 列出邮箱最近的邮件(UID + 日期 + 主题)
+    python sender/resend.py 879               # 推送 UID=879 的邮件
+    python sender/resend.py info 879          # 查看邮件 MIME 结构和解析结果(排查用)
+    python sender/resend.py                   # 不带参数进入交互模式(可连续发送)
+
+说明:
+- 读取 .env 里的 IMAP 配置和 custom_sender.py 的推送配置
+- 不改变邮件状态(不会标记已读、不会移动邮件)
+- 与自动推送的差异:不管数据库记录,指定哪封就发哪封
+"""
+import base64
+import email
+import os
+import sys
+import time
+
+# 本脚本可能被直接运行(python sender/resend.py),脚本所在目录是 sys.path[0],
+# 但项目根目录(含 app 包)不在其中 —— 手动加进来
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from app.config.settings import settings
+from app.imap.client import ImapClient
+
+try:
+    import custom_sender                     # 直接运行时:脚本目录在 sys.path
+except ImportError:
+    from sender import custom_sender         # python -m sender.resend 时用包导入
+
+
+def list_recent(count: int = 20) -> None:
+    """列出邮箱最近的邮件,方便挑选要补发的 UID"""
+    with ImapClient() as client:
+        client.select_mailbox(settings.MAILBOX)
+        _, data = client._conn.uid("search", None, "ALL")
+        uids = data[0].split()[-count:]
+        print(f"邮箱 {settings.MAILBOX} 最近 {len(uids)} 封邮件:")
+        for uid in uids:
+            _, fetch = client._conn.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE FROM)])")
+            msg = email.message_from_bytes(fetch[0][1])
+            subject = ImapClient._decode_header(msg.get("Subject", ""))[:40]
+            print(f"  {uid.decode():>6} | {msg.get('Date', ''):25} | {subject}")
+
+
+def _dump_mime(msg, indent: int = 0) -> None:
+    """打印邮件的 MIME 部件树(排查"没正文/没附件"用)"""
+    cd = msg.get_content_disposition()
+    fn = msg.get_filename()
+    if msg.is_multipart():
+        info = "容器"
+        print("  " * indent + f"{msg.get_content_type():30} | {info}")
+        for part in msg.get_payload():
+            _dump_mime(part, indent + 1)
+    else:
+        raw = msg.get_payload(decode=True)
+        size = f"{len(raw)} bytes" if raw is not None else "无内容"
+        print("  " * indent + f"{msg.get_content_type():30} | disposition={cd} | filename={fn} | {size}")
+
+
+def show_info(uid: str) -> int:
+    """查看邮件的 MIME 结构和解析结果(排查为什么没正文/没附件)"""
+    if not uid.isdigit():
+        print("UID 必须是数字。")
+        return 1
+    with ImapClient() as client:
+        client.select_mailbox(settings.MAILBOX)
+        status, data = client._conn.uid("fetch", uid, "(RFC822)")
+        if status != "OK" or not data or data[0] is None:
+            print(f"拉取失败:UID {uid} 不存在。")
+            return 1
+        msg = email.message_from_bytes(data[0][1])
+        print(f"=== 邮件 {uid} 的 MIME 结构 ===")
+        _dump_mime(msg)
+        print(f"=== 解析结果 ===")
+        payload = client.parse_email(uid)
+    data = payload.model_dump(by_alias=True)
+    print(f"主题: {data.get('subject')}")
+    print(f"text_body 长度: {len(data.get('text_body') or '')}")
+    print(f"html_body 长度: {len(data.get('html_body') or '')}")
+    print(f"附件数量: {len(data.get('attachments', []))}")
+    for att in data.get("attachments", []):
+        print(f"  - {att['filename']} ({att['content_type']})")
+    return 0
+
+
+def send_by_uid(uid: str) -> int:
+    if not uid.isdigit():
+        print("UID 必须是数字。")
+        return 1
+    print(f"正在从 {settings.IMAP_HOST} 拉取 UID {uid}...", file=sys.stderr)
+    with ImapClient() as client:
+        client.select_mailbox(settings.MAILBOX)
+        payload = client.parse_email(uid)              # MessageEnvelope
+    data = payload.model_dump(by_alias=True)
+    print(f"已获取: {data.get('subject')} | {data.get('from')}", file=sys.stderr)
+
+    ok = True
+
+    # 正文推送决策 + 发送顺序与自动推送一致:文字 → 100ms → 图片/附件
+    need_image, body_text = custom_sender.decide_body(data)
+    if not custom_sender.send_text(data, body_text):
+        ok = False
+    if need_image or data.get("attachments"):
+        time.sleep(0.1)
+    if need_image and not custom_sender.send_body_image(data):
+        ok = False
+    for att in data.get("attachments", []):
+        try:
+            raw = base64.b64decode(att.get("data", ""))
+        except Exception as e:
+            print(f"附件 {att.get('filename')} 解码失败,跳过: {e}", file=sys.stderr)
+            continue
+        if not custom_sender.send_attachment(
+            att.get("filename", "未命名"),
+            att.get("content_type", "application/octet-stream"),
+            raw,
+        ):
+            ok = False
+    print("发送完成" if ok else "部分发送失败", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "list":
+        list_recent()
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "info":
+        return show_info(sys.argv[2] if len(sys.argv) >= 3 else input("UID> ").strip())
+    if len(sys.argv) >= 2:
+        # 命令行直接指定 UID:发送一次即退出
+        return send_by_uid(sys.argv[1])
+
+    # 交互模式:发完一封可以继续选择下一封
+    print("交互模式:输入 UID 发送邮件,list 查看最近邮件,info <UID> 查看邮件详情,quit 退出。")
+    while True:
+        try:
+            line = input("UID> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        if line.lower() in ("quit", "q", "exit"):
+            return 0
+        parts = line.split(maxsplit=1)
+        if parts[0].lower() == "list":
+            list_recent()
+            continue
+        if parts[0].lower() == "info":
+            uid_arg = parts[1].strip() if len(parts) > 1 else input("UID> ").strip()
+            show_info(uid_arg)
+            continue
+        if not line.isdigit():
+            print("UID 必须是数字(或输入 list / info / quit)。")
+            continue
+        send_by_uid(line)
+        print()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

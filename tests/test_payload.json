@@ -1,0 +1,50 @@
+{
+  "uid": "1809",
+  "subject": "Your invoice is ready",
+  "from": "billing@example.com",
+  "to": "filter@mydomain.com",
+  "cc": "finance@example.com",
+  "reply_to": "billing@example.com",
+  "date": "2025-01-15T14:32:00",
+  "message_id": "<CAB12345@mail.example.com>",
+  "in_reply_to": "<OLD67890@mail.example.com>",
+  "references": "<OLD67890@mail.example.com>",
+  "priority": "1 (Highest)",
+  "x_mailer": "Postfix",
+  "organization": "Example Corp",
+  "return_path": "<bounce@example.com>",
+  "sender": "billing@example.com",
+  "delivered_to": "filter@mydomain.com",
+  "x_original_to": "filter@mydomain.com",
+  "authentication_results": "mx.example.com; spf=pass smtp.mailfrom=example.com; dkim=pass header.i=@example.com; dmarc=pass",
+  "list_id": "<news.example.com>",
+  "list_unsubscribe": "<mailto:unsub@example.com>",
+  "content_language": "zh-CN",
+  "disposition_notification_to": "billing@example.com",
+  "thread_topic": "Re: Your invoice",
+  "keywords": "invoice, 2025",
+  "text_body": "Please find your invoice...",
+  "html_body": "<p>Please find your invoice...</p>",
+  "attachments": [
+    {
+      "filename": "invoice.pdf",
+      "content_type": "application/pdf",
+      "data": "JVBERi0xLjQK"
+    }
+  ],
+  "headers": {
+    "received": "from mail.example.com (mail.example.com [1.2.3.4]) by mx.example.com (Postfix) with ESMTP id ABC123 for <filter@mydomain.com>; Wed, 15 Jan 2025 14:32:01 +0800 (CST)",
+    "return-path": "<bounce@example.com>",
+    "delivered-to": "filter@mydomain.com",
+    "from": "billing@example.com",
+    "to": "filter@mydomain.com",
+    "cc": "finance@example.com",
+    "subject": "Your invoice is ready",
+    "date": "Tue, 14 Jan 2025 14:32:00 +0800",
+    "message-id": "<CAB12345@mail.example.com>",
+    "x-priority": "1 (Highest)",
+    "mime-version": "1.0",
+    "content-type": "multipart/mixed; boundary=\"abc123\"",
+    "authentication-results": "mx.example.com; spf=pass smtp.mailfrom=example.com; dkim=pass header.i=@example.com; dmarc=pass"
+  }
+}

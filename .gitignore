@@ -1,0 +1,44 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---------- IDE / 操作系统 ----------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---------- Claude Code ----------
+# 本机会话工具(如 unit-test skill),不随仓库分发
+.claude/
+
+# ---------- 配置与密钥(绝不提交) ----------
+# 真实配置(含邮箱密码/授权码),模板见 .env.example
+.env
+.env.local
+# 真实推送脚本(含 API 密钥),模板见 sender/custom_sender.py.example
+sender/custom_sender.py
+# 项目内部分析文档(含踩坑记录,仅本机使用)
+CLAUDE.md
+
+# ---------- 运行时数据 ----------
+/data/
+/logs/
+docker-compose.yml
+*.db
+*.sqlite3
+
+# ---------- 调试产物 ----------
+# 单封邮件预览调试文件(可能含真实邮件内容)
+/邮件预览_*.md

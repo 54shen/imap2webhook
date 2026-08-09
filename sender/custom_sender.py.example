@@ -1,0 +1,65 @@
+#!/usr/bin/env python
+"""
+imap2webhook 自定义推送脚本模板
+=================================
+使用方法:
+    1. 把本文件复制为 custom_sender.py
+    2. 在 .env 里设置 CUSTOM_SENDER=./custom_sender.py
+    3. 重启服务后,每封邮件的发送都会改由本脚本处理
+
+脚本约定(必须遵守):
+    - 邮件负载(JSON)通过标准输入(stdin)传入,一次调用处理一封邮件
+    - 退出码 0    = 投递成功(服务会把邮件 UID 记入数据库)
+    - 退出码非 0  = 投递失败(服务会按 WEBHOOK_RETRIES 重试;仍失败则
+                   保留该邮件,下次有新邮件或重连时自动补发)
+    - 可以用 os.environ 读取环境变量(继承服务进程,包括 .env 里配置的
+      所有项,如 WEBHOOK);也可以自己往 .env 里加私有配置项
+    - 运行脚本的是服务同一个虚拟环境的 Python,可随意 import requests 等依赖
+    - 出错时把原因打印到 stderr,服务日志里能看到
+
+建议:先跑通默认行为(示例 1),再按需放开示例 2/3。
+"""
+import json
+import os
+import sys
+
+import requests
+
+
+def main():
+    payload = json.load(sys.stdin)
+    print(f"custom_sender 收到邮件: uid={payload.get('uid')} subject={payload.get('subject')!r}", file=sys.stderr)
+
+    # ============ 在这里写你自己的推送逻辑 ============
+
+    # ---- 示例 1:默认行为 = 原样 POST 到 WEBHOOK,可加自定义请求头 ----
+    response = requests.post(
+        os.environ.get("WEBHOOK", ""),
+        json=payload,
+        timeout=10,
+        headers={
+            "X-Api-Key": os.environ.get("WEBHOOK_SECRET", ""),   # 自定义鉴权头
+        },
+    )
+    if response.status_code >= 400:
+        print(f"webhook returned HTTP {response.status_code}", file=sys.stderr)
+        return 1
+    print(f"webhook returned HTTP {response.status_code}", file=sys.stderr)
+
+    # ---- 示例 2:按条件过滤,不想推送的邮件直接返回 0(算成功,不再重试)----
+    # if "spam@example.com" in payload.get("from", ""):
+    #     print("已按发件人过滤,不推送", file=sys.stderr)
+    #     return 0
+
+    # ---- 示例 3:加工字段后再推送 ----
+    # payload["source"] = "imap2webhook"
+    # payload["attachments_count"] = len(payload.get("attachments", []))
+
+    # ---- 示例 4:推送到多个地址 / 转发到钉钉、企业微信机器人 ----
+    # 钉钉:requests.post(dingtalk_url, json={"msgtype": "text", "text": {"content": payload["subject"]}})
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

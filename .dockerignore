@@ -1,0 +1,21 @@
+# 密钥与隐私:绝不进镜像
+.env
+CLAUDE.md
+sender/custom_sender.py
+
+# 运行时数据 / 本地环境
+data
+logs
+.venv
+__pycache__
+*.pyc
+
+# 与镜像无关
+.git
+.claude
+tests
+README.md
+start.bat
+Dockerfile
+.dockerignore
+邮件预览_*.md
