@@ -4,8 +4,7 @@ import sys
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-# 本地运行:加载项目根目录的 .env(优先于默认值,不覆盖已设置的环境变量)
-# Docker 中没有 .env 文件,该调用为空操作,不受影响。
+# 加载项目根目录的 .env(优先于默认值,不覆盖已设置的环境变量)
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -58,7 +57,7 @@ class Settings:
         self.LOG_LEVEL       = os.environ.get("LOG_LEVEL", "INFO").upper()
         self.PUSH_RETRIES    = int(os.environ.get("PUSH_RETRIES", "3"))
         self.MAX_ATTACH_MB   = int(os.environ.get("MAX_ATTACH_MB", "10"))
-        self.DB_PATH         = os.environ.get("DB_PATH", "/app/data/data.db")
+        self.DB_PATH         = os.environ.get("DB_PATH", "./data/data.db")
         self.CUSTOM_SENDER   = os.environ.get("CUSTOM_SENDER", "")
         self._validate()
 
@@ -73,13 +72,13 @@ class Settings:
         missing = [name for name, val in mandatory.items() if not val]
         if missing:
             logger.error(
-                "Missing mandatory environment variables: %s — fix your config and restart the container.",
+                "Missing mandatory environment variables: %s — fix your config and restart the service.",
                 ', '.join(missing)
             )
             sys.exit(1)
         if self.CUSTOM_SENDER and not os.path.isfile(self.CUSTOM_SENDER):
             logger.error(
-                "CUSTOM_SENDER file not found: %s — check the path and restart the container.",
+                "CUSTOM_SENDER file not found: %s — check the path and restart the service.",
                 self.CUSTOM_SENDER
             )
             sys.exit(1)

@@ -1,6 +1,6 @@
 # imap2webhook
 
-一个轻量级服务,用于监听 IMAP 邮箱并将新邮件实时转发到微信/钉钉等任意目标。之所以构建它,是因为 n8n 自带的 IMAP 节点用起来不如预期。该服务负责「监听 + 结构化转发」部分:把新邮件解析成统一的 JSON 格式交给自定义推送脚本(`sender/custom_sender.py`),脚本想怎么处理都行(推微信、发钉钉、存库……)。
+一个轻量级服务,用于监听 IMAP 邮箱并将新邮件实时转发到微信/钉钉等任意目标。之所以构建它,是因为 n8n 自带的 IMAP 节点用起来不如预期。该服务负责「监听 + 结构化转发」部分:把新邮件解析成统一的 JSON 格式交给自定义推送脚本(`custom_sender.py`),脚本想怎么处理都行(推微信、发钉钉、存库……)。
 
 *后续计划:nocodenode 上会增加一个轻量级 FastAPI 用来直接操作 IMAP。*
 
@@ -48,40 +48,40 @@
 
 ```
 imap2webhook/
-├── app/                        # 应用主代码
-│   ├── main.py                 # 入口:初始化日志 → 创建 EmailManager → 启动主循环
-│   ├── manager.py              # 核心管理器:主循环、去重、推送与重试(每账户一线程)
-│   ├── sqlitedb.py             # SQLite 封装:邮件 UID 与元数据(UIDVALIDITY)存储
-│   ├── config/                 # 配置模块
-│   │   ├── settings.py         # 从环境变量 / .env 读取配置,并校验必填项
-│   │   └── logger.py           # 日志初始化(级别由 LOG_LEVEL 控制)
-│   └── imap/                   # IMAP 模块
-│       ├── client.py           # ImapClient:连接、选邮箱、搜索/拉取邮件、解析、IDLE 监听
-│       └── schemas.py          # Pydantic 数据模型:Attachment、MessageEnvelope(推送负载)
-├── sender/                     # 推送脚本(每封邮件独立进程运行,改完即时生效)
-│   ├── custom_sender.py        # 自定义推送脚本(含密钥,不提交;模板见 custom_sender.py.example)
-│   ├── custom_sender.py.example  # 推送脚本模板(可复制的起点)
-│   ├── browser_image.py        # 无头浏览器(Edge/Chromium)按浏览器视角把邮件 HTML 渲染成图片
-│   ├── table_image.py          # Pillow 兜底渲染(浏览器不可用时的降级方案)
-│   └── resend.py               # 手动补发工具(list / info / <uid> / 交互模式)
-├── tests/
-│   └── test_payload.json       # 推送脚本独立测试用的样例邮件负载(example.com 假数据)
-├── Dockerfile                  # python:3.12-slim 镜像,非 root 运行,声明 /app/data 卷
-├── .dockerignore               # 排除密钥与本地数据进镜像
-├── requirements.txt            # 依赖:requests、pydantic、python-dotenv、Pillow、playwright
-├── .env.example                # 配置文件模板(复制为 .env 后填写)
+├── main.py                     # 入口薄壳:注入 src/ 到 sys.path → 复用 app 包启动主循环
+├── custom_sender.py            # 自定义推送脚本(最常改,改完即时生效;含密钥,不提交;
+│                               #   模板见 src/sender/custom_sender.py.example)
+├── resend.py                   # 手动补发工具(list / info / <uid> / 交互模式)
 ├── start.bat                   # Windows 一键启动脚本
+├── .env / .env.example         # 本地配置(模板)/ 配置模板
 ├── README.md                   # 本文档
-└── .gitignore
+├── requirements.txt            # 依赖:requests、pydantic、python-dotenv、Pillow、playwright
+├── .gitignore
+└── src/                        # 实现代码(根目录三个入口脚本各自注入 src/ 到 sys.path)
+    ├── app/                    # 应用主代码(app 包名)
+    │   ├── manager.py          # 核心管理器:主循环、去重、推送与重试(每账户一线程)
+    │   ├── sqlitedb.py         # SQLite 封装:邮件 UID 与元数据(UIDVALIDITY)存储
+    │   ├── config/             # 配置模块
+    │   │   ├── settings.py     # 从环境变量 / .env 读取配置,并校验必填项
+    │   │   └── logger.py       # 日志初始化(级别由 LOG_LEVEL 控制)
+    │   └── imap/               # IMAP 模块
+    │       ├── client.py       # ImapClient:连接、选邮箱、搜索/拉取邮件、解析、IDLE 监听
+    │       └── schemas.py      # Pydantic 数据模型:Attachment、MessageEnvelope(推送负载)
+    ├── sender/                 # 推送脚本的渲染辅助(每封邮件独立进程运行,改完即时生效)
+    │   ├── custom_sender.py.example  # 推送脚本模板(可复制的起点)
+    │   ├── browser_image.py    # 无头浏览器(Edge/Chromium)按浏览器视角把邮件 HTML 渲染成图片
+    │   └── table_image.py      # Pillow 兜底渲染(浏览器不可用时的降级方案)
+    └── tests/
+        └── test_payload.json   # 推送脚本独立测试用的样例邮件负载(example.com 假数据)
 ```
 
 ### 各模块职责
 
-**app/main.py — 入口**
+**main.py — 入口**
 
-只有 3 行逻辑:初始化日志 → 实例化 `EmailManager` → 调用 `run()` 进入无限循环。容器中通过 `python -u app/main.py` 启动。
+根目录薄壳:把 `src/` 注入 `sys.path`(保留 `app` 包名)→ 初始化日志 → 实例化 `EmailManager` → 调用 `run()` 进入无限循环。用 `python main.py` 启动(必须在项目根目录)。
 
-**app/manager.py — 核心管理器 `EmailManager`**
+**src/app/manager.py — 核心管理器 `EmailManager`**
 
 整个服务的心脏,负责编排:
 
@@ -90,7 +90,7 @@ imap2webhook/
 - `manage_unseens()`:遍历未读 UID,**跳过已在数据库中的**,对新的 UID 依次执行:解析 → 转发 → 登记 UID。单封邮件解析失败不会影响其他邮件,失败项下次触发时自动重试
 - `send_payload()`:以子进程运行自定义推送脚本(邮件 JSON 从 stdin 传入,**退出码 0** = 投递成功);按 `PUSH_RETRIES` 退避重试(2s/4s/8s),全部失败返回 `False`,该 UID **不入库**,保留待下次触发补发
 
-**app/imap/client.py — IMAP 客户端 `ImapClient`**
+**src/app/imap/client.py — IMAP 客户端 `ImapClient`**
 
 对 Python 标准库 `imaplib.IMAP4_SSL` 的薄封装(支持 `with` 语句):
 
@@ -100,34 +100,34 @@ imap2webhook/
 - `parse_email()`:`UID FETCH RFC822` 拉取完整邮件,用 `email` 标准库解析;主题/发件人做 RFC 2047 解码(中文不乱码),正文按声明 charset 解码(GBK/GB2312 等),附件 base64 编码(超过 `MAX_ATTACH_MB` 的跳过)
 - `idle()`:手动发送 `IDLE` 命令(无需第三方库,每次使用唯一 tag)。socket 超时 29 分钟以应对服务器 30 分钟 IDLE 限制;收到 `EXISTS` 后发送 `DONE` 返回 `True`;超时/中断时先终止 IDLE 再断开连接,由外层干净地重连
 
-**app/imap/schemas.py — 数据模型**
+**src/app/imap/schemas.py — 数据模型**
 
 用 Pydantic 定义推送负载结构。`MessageEnvelope.from_` 字段通过别名 `from` 输出,保证 JSON 里是标准字段名 `"from"`。
 
-**app/sqlitedb.py — SQLite 封装 `SqliteDb`**
+**src/app/sqlitedb.py — SQLite 封装 `SqliteDb`**
 
-- 数据库文件路径由 `DB_PATH` 指定(容器内默认 `/app/data/data.db`,必须挂载卷)
+- 数据库文件路径由 `DB_PATH` 指定(默认 `./data/data.db`,`start.bat` 会自动创建 `data/` 目录)
 - 表:`email_uids(id, uid UNIQUE)` 记录已处理邮件,`meta(key, value)` 存 UIDVALIDITY
 - 启动时把所有已记录的 UID 加载进内存集合,查询去重都在内存中进行
 - `flush_uids()`:清空所有记录(由 `FLUSH_DB` 或 UIDVALIDITY 变化触发)
 
-**app/config/settings.py — 配置**
+**src/app/config/settings.py — 配置**
 
 启动时读取环境变量并加载 `.env`(如有),`IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` / `CUSTOM_SENDER` 为必填项,缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
 
-**app/config/logger.py — 日志**
+**src/app/config/logger.py — 日志**
 
-统一日志格式:`%(levelname)-9s | %(name)s | %(message)s`,级别由 `LOG_LEVEL` 控制,输出到标准输出(容器中通过 `docker logs` 查看)。同时固定以 DEBUG 级别写入 `logs/imap2webhook.log`(滚动保留 3×5MB),用于排查所有活动。
+统一日志格式:`%(levelname)-9s | %(name)s | %(message)s`,级别由 `LOG_LEVEL` 控制,输出到控制台(运行 `start.bat` 的窗口可见)。同时固定以 DEBUG 级别写入 `logs/imap2webhook.log`(滚动保留 3×5MB),用于排查所有活动。
 
-**sender/custom_sender.py — 自定义推送脚本**
+**custom_sender.py — 自定义推送脚本**
 
-当 `.env` 设置了 `CUSTOM_SENDER` 时,每封邮件由服务**以子进程方式**运行一次该脚本,邮件 JSON 通过 stdin 传入。因为每封邮件独立启动,修改它**不需要重启服务**,下一封邮件即生效。推送逻辑(正文策略、微信 API、图片渲染)都在这里。
+当 `.env` 设置了 `CUSTOM_SENDER` 时,每封邮件由服务**以子进程方式**运行一次该脚本(脚本在项目根目录),邮件 JSON 通过 stdin 传入。因为每封邮件独立启动,修改它**不需要重启服务**,下一封邮件即生效。推送逻辑(正文策略、微信 API、图片渲染)都在这里。它内部把 `src/sender/` 注入 `sys.path` 以导入渲染模块。
 
-**sender/browser_image.py / sender/table_image.py — 正文图片渲染**
+**src/sender/browser_image.py / src/sender/table_image.py — 正文图片渲染**
 
 邮件正文带 HTML 且按策略需要发图片时:优先用无头 Edge/Chromium 按「浏览器观看邮件」的视角把 HTML 渲染成高清图片(dpr=3);失败则回退到 Pillow 直接绘制。渲染失败跳过图片,不影响文字消息。
 
-**sender/resend.py — 手动补发工具**
+**resend.py — 手动补发工具**
 
 不经过服务、直接按 UID 重推指定邮件(与自动推送共用 `custom_sender.py` 的发送逻辑,发送顺序一致)。不会改变邮件状态。用法见文件头注释。
 
@@ -222,7 +222,7 @@ imap2webhook/
 | `PUSH_RETRIES`   | 否       | `3`               | 推送失败重试次数(2s/4s/8s 退避)            |
 | `FLUSH_DB`       | 否       | `false`           | 为 `true` 时启动时清空数据库中的 UID 记录    |
 | `LOG_LEVEL`      | 否       | `INFO`            | 日志级别(DEBUG / INFO / WARNING / ERROR)    |
-| `DB_PATH`        | 否       | `/app/data/data.db` | SQLite 数据库文件路径(本地运行请改为 `./data/data.db`) |
+| `DB_PATH`        | 否       | `./data/data.db` | SQLite 数据库文件路径 |
 
 ## 多账户(同时监听多个邮箱)
 
@@ -252,39 +252,7 @@ IMAP1_PAST_UNSEEN=false    # 可选,未配置继承全局默认
 
 ## 快速开始
 
-### 方式一:Docker(推荐)
-
-```yaml
-services:
-  imap2webhook:
-    image: 
-    restart: unless-stopped
-    container_name: imap2webhook
-    volumes:
-      - imap_data:/app/data
-      # 推送脚本含你的密钥,不入镜像,用只读挂载注入
-      - ./sender/custom_sender.py:/app/sender/custom_sender.py:ro
-    environment:
-      IMAP_HOST: mail.emailhost.com
-      IMAP_USER: you@yourdomain.com
-      IMAP_PWD: yourpassword
-      CUSTOM_SENDER: /app/sender/custom_sender.py
-      MAILBOX: INBOX
-      PAST_UNSEEN: false
-      ATTACH: true
-      LOG_LEVEL: INFO
-      FLUSH_DB: false
-volumes:
-  imap_data:
-
-```
-
-```bash
-docker compose up -d
-docker logs -f imap2webhook
-```
-
-### 方式二:本地直接运行(Windows 一键)
+### 本地运行(Windows 一键)
 
 **Windows:双击 `start.bat` 即可。**脚本会自动:创建/复用虚拟环境 → 安装依赖 → 复制 `.env.example` 为 `.env`(仅首次)→ 检查配置未填写时提示 → 启动服务。
 
@@ -300,20 +268,20 @@ python -m venv .venv
 copy .env.example .env                          # Windows
 cp .env.example .env                            # Linux / macOS
 
-# 3. 启动(用 -m 方式,否则 import app 会失败)
-.venv/Scripts/python -m app.main                # Windows
-.venv/bin/python -m app.main                    # Linux / macOS
+# 3. 启动(main.py 在根目录,内部注入 src/ 后复用 app 包)
+.venv/Scripts/python main.py                    # Windows
+.venv/bin/python main.py                        # Linux / macOS
 ```
 
-> 提示:本地运行时请把 `DB_PATH` 设为 `./data/data.db`(`.env.example` 已包含),否则会尝试写入容器内的 `/app/data/data.db`。`start.bat` 会自动创建 `data/` 目录。
+> 提示:`.env.example` 中 `DB_PATH` 已设为 `./data/data.db`,`start.bat` 会自动创建 `data/` 目录。
 
 ## 自定义推送脚本(CUSTOM_SENDER)
 
 推送由**你自己的 Python 脚本**完成——每封邮件都会被服务以子进程方式运行一次该脚本,邮件 JSON 从 stdin 传入。推送逻辑(加鉴权头、按发件人过滤、转发到微信/钉钉/企业微信机器人、推给多个地址、加工字段……)全部由脚本决定,改完立即生效,无需重启服务:
 
-1. 复制模板:`copy sender\custom_sender.py.example sender\custom_sender.py`
-2. 在 `.env` 里设置:`CUSTOM_SENDER=./sender/custom_sender.py`
-3. 按需修改 `sender\custom_sender.py`(模板里有完整示例)
+1. 复制模板:`copy src\sender\custom_sender.py.example custom_sender.py`
+2. 在 `.env` 里设置:`CUSTOM_SENDER=./custom_sender.py`
+3. 按需修改根目录的 `custom_sender.py`(模板里有完整示例)
 
 **脚本约定:**
 
@@ -326,7 +294,6 @@ cp .env.example .env                            # Linux / macOS
 ## 数据持久化与去重
 
 - 每封成功转发的邮件,其 UID 都会写入 SQLite(路径由 `DB_PATH` 指定)
-- 容器部署时数据库文件必须放在**挂载的卷**中,否则容器重建后数据丢失,已处理过的邮件会被重复转发
 - 去重以「(账户, UID) 是否在数据库中」为准,内存集合加速判断;多账户各自独立去重;如需清空历史记录,设置 `FLUSH_DB=true` 重启一次,然后改回 `false`
 - 邮箱被重建(UIDVALIDITY 变化)时自动清空该账户的记录,避免 UID 复用导致漏邮件
 
@@ -337,4 +304,3 @@ cp .env.example .env                            # Linux / macOS
 - **IDLE 依赖服务器支持**:主流 IMAP 服务器(Gmail、Outlook、自建 Dovecot 等)都支持 `IDLE`,若服务器拒绝该命令,服务会报错并按退避间隔重连
 - **首次连接的行为差异**:默认(`PAST_UNSEEN=false`)时邮箱里已有的旧未读邮件只会被登记、不会转发;如果想一启动就把积压的未读邮件全部推送,首次启动前设置 `PAST_UNSEEN=true`
 - **自签名证书**:自建邮件服务器使用自签名证书时,设置 `IMAP_SSL_VERIFY=false`
-- **Docker 镜像以非 root 运行**:若旧版容器以 root 写入过卷数据,升级后注意卷内文件属主需为 UID 1000

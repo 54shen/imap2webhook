@@ -5,13 +5,13 @@ imap2webhook 邮件补发工具
 按 UID 把指定邮件重新推送到微信(与自动推送共用 custom_sender.py 的逻辑)。
 
 用法(在项目根目录下运行):
-    python sender/resend.py list                    # 列默认账户最近的邮件
-    python sender/resend.py list 1                  # 列账户 1 最近的邮件
-    python sender/resend.py 879                     # 推送默认账户 UID=879 的邮件
-    python sender/resend.py 879 1                   # 推送账户 1 UID=879 的邮件
-    python sender/resend.py info 879                # 查看 MIME 结构和解析结果(默认账户)
-    python sender/resend.py info 879 1              # 同上,账户 1
-    python sender/resend.py                         # 不带参数进入交互模式(可连续发送)
+    python resend.py list                    # 列默认账户最近的邮件
+    python resend.py list 1                  # 列账户 1 最近的邮件
+    python resend.py 879                     # 推送默认账户 UID=879 的邮件
+    python resend.py 879 1                   # 推送账户 1 UID=879 的邮件
+    python resend.py info 879                # 查看 MIME 结构和解析结果(默认账户)
+    python resend.py info 879 1              # 同上,账户 1
+    python resend.py                         # 不带参数进入交互模式(可连续发送)
 
 说明:
 - 账户编号与 .env 前缀对应:默认(账户 0,无前缀 IMAP_*)、1(IMAP1_*)、2(IMAP2_*)...
@@ -25,17 +25,13 @@ import os
 import sys
 import time
 
-# 本脚本可能被直接运行(python sender/resend.py),脚本所在目录是 sys.path[0],
-# 但项目根目录(含 app 包)不在其中 —— 手动加进来
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# 核心实现(app 包)在 src/ 下 —— 注入到 sys.path 后 from app.xxx 原样可用
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from app.config.settings import AccountConfig, settings
 from app.imap.client import ImapClient
 
-try:
-    import custom_sender                     # 直接运行时:脚本目录在 sys.path
-except ImportError:
-    from sender import custom_sender         # python -m sender.resend 时用包导入
+import custom_sender        # 与根目录的推送脚本共用逻辑(其内部会注入 src/sender 渲染模块)
 
 
 def _resolve_account(account=None) -> AccountConfig:

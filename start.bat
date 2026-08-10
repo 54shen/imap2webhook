@@ -63,9 +63,8 @@ echo.
 echo [3/3] Starting service... (press Ctrl+C to stop)
 echo        DB: %CD%\data\data.db
 echo.
-REM -m app.main: run as a module so the project root is on sys.path
-REM (running app/main.py directly breaks "import app..." on Windows)
-".venv\Scripts\python.exe" -m app.main
+REM main.py injects src/ into sys.path, then runs the app
+".venv\Scripts\python.exe" main.py
 
 echo.
 echo Service stopped.

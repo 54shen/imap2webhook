@@ -4,7 +4,8 @@ from logging.handlers import RotatingFileHandler
 from app.config.settings import settings
 
 # 日志文件位置:项目根目录 logs/imap2webhook.log(已加入 .gitignore)
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs")
+# src/app/config/logger.py 上跳 4 级才到项目根
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "logs")
 LOG_PATH = os.path.join(LOG_DIR, "imap2webhook.log")
 
 def setup_logging() -> None:
