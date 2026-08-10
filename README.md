@@ -275,6 +275,101 @@ cp .env.example .env                            # Linux / macOS
 
 > 提示:`.env.example` 中 `DB_PATH` 已设为 `./data/data.db`,`start.bat` 会自动创建 `data/` 目录。
 
+## Linux 部署(systemd 开机自启)
+
+以 `/root/imap2webhook` 为例(路径可换)。
+
+### 1. 克隆 + 安装依赖
+
+```bash
+git clone https://github.com/54shen/imap2webhook.git
+cd ~/imap2webhook
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt          # 国内可加 -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+### 2. 配置(必填)
+
+> ⚠️ 两个 `cp` 缺一不可,漏掉任何一个服务都起不来(报错见第 5 节对照表);
+> `custom_sender.py` 必须放在**项目根目录**(不是 `src/` 下)。
+
+```bash
+cp .env.example .env
+cp src/sender/custom_sender.py.example custom_sender.py   # 推送脚本含密钥,不入仓库
+mkdir -p data                                            # 数据库目录(logs/ 启动时自动创建)
+```
+
+- 编辑 `.env`:必填 `IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` / `CUSTOM_SENDER`(`CUSTOM_SENDER` 保持 `./custom_sender.py`,相对 `WorkingDirectory` 解析)
+- 编辑 `custom_sender.py`:填 API 密钥(文件头「配置区」),改完**下一封邮件即生效,无需重启服务**
+
+### 3. 创建 systemd 服务
+
+⚠ `ExecStart` 必须用 venv 里的 python(不是系统 python3,否则依赖找不到):
+
+```bash
+cat > /etc/systemd/system/imap2webhook.service << 'EOF'
+[Unit]
+Description=imap2webhook - IMAP to WeChat forwarding
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/imap2webhook
+ExecStart=/root/imap2webhook/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+### 4. 启动 + 开机自启
+
+```bash
+systemctl daemon-reload
+systemctl enable imap2webhook
+systemctl start imap2webhook
+systemctl status imap2webhook        # 确认 active (running)
+```
+
+### 5. 验证
+
+本服务**只主动连接 IMAP 服务器,不监听任何入站端口**,无需放行防火墙。
+
+```bash
+journalctl -u imap2webhook -f        # 实时日志
+```
+
+正常启动日志:账户启动 → `Unseen emails at startup: N`(登记已有未读)→ 进入 IDLE 监听;新邮件到达会看到解析与推送记录。**收不到微信提醒时先看这里**。
+
+**常见报错对照表**(`journalctl -u imap2webhook -n 30` 查看):
+
+| journalctl 报错 | 原因 | 解决 |
+|---|---|---|
+| `Missing mandatory environment variables: IMAP_HOST, IMAP_USER, IMAP_PWD, CUSTOM_SENDER` | `.env` 未复制或未填写 | `cp .env.example .env` 后填四个必填项,重启 |
+| `CUSTOM_SENDER file not found: ./custom_sender.py` | 根目录缺推送脚本,或放到了 `src/` 下 | `cp src/sender/custom_sender.py.example custom_sender.py` 并填密钥,必须放项目根目录 |
+| `unable to open database file` | `data/` 目录不存在 | `mkdir -p data`,重启 |
+
+### 6. 更新与运维
+
+```bash
+# 一键更新:拉代码 + 装依赖 + 重启
+cd ~/imap2webhook && git pull && venv/bin/pip install -r requirements.txt && systemctl restart imap2webhook
+
+# 看日志
+journalctl -u imap2webhook -f
+journalctl -u imap2webhook -n 100    # 最近 100 行
+```
+
+Linux 部署注意事项:
+
+- **HTML 正文图片渲染**:优先用无头浏览器(需 `venv/bin/playwright install chromium`);未安装时自动回退 Pillow 渲染,但需中文字体(如 `apt install fonts-noto-cjk`)
+- **数据都在项目目录**:`data/`(去重数据库)与 `logs/`(调试日志),备份 = 拷贝这两个目录
+- **断线自动恢复**:IMAP 断线按退避自动重连,IDLE 每 10 分钟主动刷新,无需额外守护
+
 ## 自定义推送脚本(CUSTOM_SENDER)
 
 推送由**你自己的 Python 脚本**完成——每封邮件都会被服务以子进程方式运行一次该脚本,邮件 JSON 从 stdin 传入。推送逻辑(加鉴权头、按发件人过滤、转发到微信/钉钉/企业微信机器人、推给多个地址、加工字段……)全部由脚本决定,改完立即生效,无需重启服务:
