@@ -14,6 +14,7 @@
 - 🔁 **自动重连**:连接异常时退避重试(10 秒起、封顶 60 秒),断线期间到达的邮件会在重连后补发
 - 🚀 **推送失败重试**:发送失败自动重试(2s/4s/8s 退避),仍失败则保留邮件待下次触发时补发,不丢邮件
 - 🔧 **纯配置驱动**:所有行为通过环境变量(或本地 `.env` 文件)控制,无需改代码
+- 🌐 **英文邮件自动翻译**:检测到英文邮件时,自动调用 DeepSeek 把文字通知和正文渲染图翻译成中文(未配 `DEEPSEEK_API_KEY` 则按原文推送)
 
 ## 工作流程
 
@@ -55,7 +56,7 @@ imap2webhook/
 ├── start.bat                   # Windows 一键启动脚本
 ├── .env / .env.example         # 本地配置(模板)/ 配置模板
 ├── README.md                   # 本文档
-├── requirements.txt            # 依赖:requests、pydantic、python-dotenv、Pillow、playwright
+├── requirements.txt            # 依赖:requests、pydantic、python-dotenv、playwright、langdetect
 ├── .gitignore
 └── src/                        # 实现代码(根目录三个入口脚本各自注入 src/ 到 sys.path)
     ├── app/                    # 应用主代码(app 包名)
@@ -69,8 +70,7 @@ imap2webhook/
     │       └── schemas.py      # Pydantic 数据模型:Attachment、MessageEnvelope(推送负载)
     ├── sender/                 # 推送脚本的渲染辅助(每封邮件独立进程运行,改完即时生效)
     │   ├── custom_sender.py.example  # 推送脚本模板(可复制的起点)
-    │   ├── browser_image.py    # 无头浏览器(Edge/Chromium)按浏览器视角把邮件 HTML 渲染成图片
-    │   └── table_image.py      # Pillow 兜底渲染(浏览器不可用时的降级方案)
+    │   └── browser_image.py    # 无头浏览器(Edge/Chromium)按浏览器视角把邮件 HTML 渲染成图片
     └── tests/
         └── test_payload.json   # 推送脚本独立测试用的样例邮件负载(example.com 假数据)
 ```
@@ -121,11 +121,11 @@ imap2webhook/
 
 **custom_sender.py — 自定义推送脚本**
 
-当 `.env` 设置了 `CUSTOM_SENDER` 时,每封邮件由服务**以子进程方式**运行一次该脚本(脚本在项目根目录),邮件 JSON 通过 stdin 传入。因为每封邮件独立启动,修改它**不需要重启服务**,下一封邮件即生效。推送逻辑(正文策略、微信 API、图片渲染)都在这里。它内部把 `src/sender/` 注入 `sys.path` 以导入渲染模块。
+当 `.env` 设置了 `CUSTOM_SENDER` 时,每封邮件由服务**以子进程方式**运行一次该脚本(脚本在项目根目录),邮件 JSON 通过 stdin 传入。因为每封邮件独立启动,修改它**不需要重启服务**,下一封邮件即生效。推送逻辑(正文策略、微信 API、图片渲染、英文邮件翻译)都在这里。它内部把 `src/sender/` 注入 `sys.path` 以导入渲染模块。
 
-**src/sender/browser_image.py / src/sender/table_image.py — 正文图片渲染**
+**src/sender/browser_image.py — 正文图片渲染**
 
-邮件正文带 HTML 且按策略需要发图片时:优先用无头 Edge/Chromium 按「浏览器观看邮件」的视角把 HTML 渲染成高清图片(dpr=3);失败则回退到 Pillow 直接绘制。渲染失败跳过图片,不影响文字消息。
+邮件正文带 HTML 且按策略需要发图片时:用无头 Edge/Chromium 按「浏览器观看邮件」的视角把 HTML 渲染成高清图片(dpr=3)。渲染失败则跳过图片,不影响文字消息(无兜底渲染)。
 
 **resend.py — 手动补发工具**
 
@@ -223,6 +223,7 @@ imap2webhook/
 | `FLUSH_DB`       | 否       | `false`           | 为 `true` 时启动时清空数据库中的 UID 记录    |
 | `LOG_LEVEL`      | 否       | `INFO`            | 日志级别(DEBUG / INFO / WARNING / ERROR)    |
 | `DB_PATH`        | 否       | `./data/data.db` | SQLite 数据库文件路径 |
+| `DEEPSEEK_API_KEY` | 否     | —                | 英文邮件自动翻译用(DeepSeek API);留空 = 不翻译 |
 
 ## 多账户(同时监听多个邮箱)
 
@@ -366,7 +367,7 @@ journalctl -u imap2webhook -n 100    # 最近 100 行
 
 Linux 部署注意事项:
 
-- **HTML 正文图片渲染**:优先用无头浏览器(需 `venv/bin/playwright install chromium`);未安装时自动回退 Pillow 渲染,但需中文字体(如 `apt install fonts-noto-cjk`)
+- **HTML 正文图片渲染**:仅浏览器渲染,需先 `venv/bin/playwright install chromium` 并装中文字体(如 `apt install fonts-noto-cjk`,否则中文显示为方块);无浏览器时正文图会被跳过(文字消息不受影响)
 - **数据都在项目目录**:`data/`(去重数据库)与 `logs/`(调试日志),备份 = 拷贝这两个目录
 - **断线自动恢复**:IMAP 断线按退避自动重连,IDLE 每 10 分钟主动刷新,无需额外守护
 
