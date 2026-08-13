@@ -14,7 +14,7 @@
 - 🔁 **自动重连**:连接异常时退避重试(10 秒起、封顶 60 秒),断线期间到达的邮件会在重连后补发
 - 🚀 **推送失败重试**:发送失败自动重试(2s/4s/8s 退避),仍失败则保留邮件待下次触发时补发,不丢邮件
 - 🔧 **纯配置驱动**:所有行为通过环境变量(或本地 `.env` 文件)控制,无需改代码
-- 🌐 **英文邮件自动翻译**:检测到英文邮件时,自动调用 DeepSeek 把文字通知和正文渲染图翻译成中文(未配 `DEEPSEEK_API_KEY` 则按原文推送)
+- 🌐 **英文邮件自动翻译**:检测到英文邮件时,原文立即推送,翻译完成后补发一张完整翻译图;翻译服务商/模型/key 全部可自定义(`TRANSLATE_API_*`,OpenAI 兼容或 Anthropic,未配 key 则按原文推送)
 
 ## 工作流程
 
@@ -223,7 +223,10 @@ imap2webhook/
 | `FLUSH_DB`       | 否       | `false`           | 为 `true` 时启动时清空数据库中的 UID 记录    |
 | `LOG_LEVEL`      | 否       | `INFO`            | 日志级别(DEBUG / INFO / WARNING / ERROR)    |
 | `DB_PATH`        | 否       | `./data/data.db` | SQLite 数据库文件路径 |
-| `DEEPSEEK_API_KEY` | 否     | —                | 英文邮件自动翻译用(DeepSeek API);留空 = 不翻译 |
+| `TRANSLATE_API_KEY` | 否    | —                | 翻译 API 的 Key;留空 = 不翻译 |
+| `TRANSLATE_API_URL`  | 否    | DeepSeek 端点   | 翻译接口地址(OpenAI 兼容格式) |
+| `TRANSLATE_API_MODEL`| 否    | `deepseek-chat` | 翻译模型名 |
+| `TRANSLATE_API_TYPE` | 否    | `openai`        | `openai`(DeepSeek/OpenAI/硅基流动/Ollama 等兼容)或 `anthropic`(Claude) |
 
 ## 多账户(同时监听多个邮箱)
 
