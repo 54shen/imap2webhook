@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src
 
 from app.config.settings import AccountConfig, settings
 from app.imap.client import ImapClient
+from app.sqlitedb import SqliteDb
 
 import custom_sender        # 与根目录的推送脚本共用逻辑(其内部会注入 src/sender 渲染模块)
 
@@ -145,6 +146,14 @@ def send_by_uid(uid: str, account=None) -> int:
         ):
             ok = False
     custom_sender.send_translated_image(data)
+    if ok:
+        # 补发成功 = 已处理:登记入库,避免服务按"未读且不在库"再次推送造成重复
+        # (部分失败不写库,留给服务按未读补推)
+        try:
+            SqliteDb(settings.DB_PATH, account=account.name).insert_uid(int(uid))
+            print(f"UID {uid} 已登记入库,服务不会重复推送", file=sys.stderr)
+        except Exception as e:
+            print(f"UID {uid} 登记入库失败: {e}", file=sys.stderr)
     print("发送完成" if ok else "部分发送失败", file=sys.stderr)
     return 0 if ok else 1
 
