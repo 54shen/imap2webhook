@@ -125,12 +125,12 @@ def send_by_uid(uid: str, account=None) -> int:
 
     ok = True
 
-    # 与自动推送完全一致(含英文翻译 + 正文决策):文字 → 100ms → 图片/附件
-    payload, body_text, render_html = custom_sender.prepare_payload(data)
-    if not custom_sender.send_text(payload, body_text):
+    # 与自动推送完全一致:原文文字 → 100ms → 原文图 → 附件 → 翻译图补发
+    _, body_text = custom_sender.decide_body(data)
+    if not custom_sender.send_text(data, body_text):
         ok = False
     time.sleep(0.1)
-    if not custom_sender.send_body_image(payload, render_html):
+    if not custom_sender.send_body_image(data):
         ok = False
     for att in data.get("attachments", []):
         try:
@@ -144,6 +144,7 @@ def send_by_uid(uid: str, account=None) -> int:
             raw,
         ):
             ok = False
+    custom_sender.send_translated_image(data)
     print("发送完成" if ok else "部分发送失败", file=sys.stderr)
     return 0 if ok else 1
 
