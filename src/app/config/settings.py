@@ -63,49 +63,36 @@ class Settings:
 
     def _validate(self):
         # 推送只有一条通道:自定义推送脚本(custom_sender.py)
-        mandatory = {
-            "IMAP_HOST": self.IMAP_HOST,
-            "IMAP_USER": self.IMAP_USER,
-            "IMAP_PWD":  self.IMAP_PWD,
-            "CUSTOM_SENDER": self.CUSTOM_SENDER,
-        }
-        missing = [name for name, val in mandatory.items() if not val]
-        if missing:
+        if not self.CUSTOM_SENDER:
             logger.error(
-                "Missing mandatory environment variables: %s — fix your config and restart the service.",
-                ', '.join(missing)
+                "Missing mandatory environment variable: CUSTOM_SENDER — fix your config and restart the service."
             )
             sys.exit(1)
-        if self.CUSTOM_SENDER and not os.path.isfile(self.CUSTOM_SENDER):
+        if not os.path.isfile(self.CUSTOM_SENDER):
             logger.error(
                 "CUSTOM_SENDER file not found: %s — check the path and restart the service.",
                 self.CUSTOM_SENDER
             )
             sys.exit(1)
+        # 账户只有编号形式(IMAP1_* / IMAP2_*…),无前缀默认账户已废除
+        if not os.environ.get("IMAP1_HOST"):
+            logger.error(
+                "No IMAP account configured: .env must define IMAP1_HOST / IMAP1_USER / IMAP1_PWD "
+                "(numbered accounts only, e.g. IMAP1_* / IMAP2_*)."
+            )
+            sys.exit(1)
 
     def load_accounts(self) -> list[AccountConfig]:
-        """按 .env 前缀分组加载所有账户。
+        """按 .env 前缀加载账户:只有 IMAP1_*、IMAP2_*…(编号必须连续,断号停止)。
 
-        账户 0 始终存在(无前缀 IMAP_*,必填);账户 1..N 扫描 IMAP{n}_HOST
-        是否存在,编号必须连续——有 IMAP1_* 没 IMAP2_* 时,IMAP3_* 不会加载。
+        账户名 = IMAP_USER(邮箱地址);无前缀的 IMAP_PORT/IMAP_TIMEOUT/MAILBOX 等
+        仍作为未配置项的全局默认值。
         """
-        accounts = [AccountConfig(
-            name="default",
-            imap_host=self.IMAP_HOST,
-            imap_port=self.IMAP_PORT,
-            imap_user=self.IMAP_USER,
-            imap_pwd=self.IMAP_PWD,
-            imap_ssl_verify=self.IMAP_SSL_VERIFY,
-            imap_timeout=self.IMAP_TIMEOUT,
-            mailbox=self.MAILBOX,
-            past_unseen=self.PAST_UNSEEN,
-            attach=self.ATTACH,
-            max_attach_mb=self.MAX_ATTACH_MB,
-        )]
+        accounts = []
         i = 1
         while os.environ.get(f"IMAP{i}_HOST"):
             acct = AccountConfig(
-                name=str(i),
+                name=os.environ.get(f"IMAP{i}_USER", ""),
                 imap_host=os.environ[f"IMAP{i}_HOST"],
                 imap_port=int(os.environ.get(f"IMAP{i}_PORT", str(self.IMAP_PORT))),
                 imap_user=os.environ.get(f"IMAP{i}_USER", ""),
@@ -120,8 +107,8 @@ class Settings:
             missing = [k for k, v in (("IMAP_USER", acct.imap_user), ("IMAP_PWD", acct.imap_pwd))
                        if not v]
             if missing:
-                logger.error("账户 %s 缺少必填项 %s — 补全 .env 后重启。",
-                             acct.name, ", ".join(missing))
+                logger.error("账户 %s(IMAP%s_*)缺少必填项 %s — 补全 .env 后重启。",
+                             acct.name or f"第 {i} 个", i, ", ".join(missing))
                 sys.exit(1)
             accounts.append(acct)
             i += 1

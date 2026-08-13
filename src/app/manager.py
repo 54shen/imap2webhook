@@ -167,6 +167,17 @@ class EmailManager:
         logger.info("启动 %d 个账户监听: %s",
                     len(accounts), ", ".join(a.name for a in accounts))
 
+        # 账户名迁移(旧体系 default/1/2 → 新体系邮箱):必须在 worker 线程前完成,
+        # 否则旧 UID 记录按新账户名查不到,已处理邮件会被重复推送。
+        # 前提:重排 .env 时保持账户顺序不变(迁移按旧名序号对齐)。
+        mapping = {}
+        for i, acct in enumerate(accounts):
+            old = "default" if i == 0 else str(i)
+            if old != acct.name:
+                mapping[old] = acct.name
+        if mapping and SqliteDb.migrate_account_names(settings.DB_PATH, mapping):
+            logger.warning("Migrated account names in DB: %s", mapping)
+
         threads = []
         for acct in accounts:
             # Worker 必须在目标线程内构造:SQLite 连接只能被创建它的线程使用

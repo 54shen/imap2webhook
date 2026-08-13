@@ -14,7 +14,8 @@ imap2webhook 邮件补发工具
     python resend.py                         # 不带参数进入交互模式(可连续发送)
 
 说明:
-- 账户编号与 .env 前缀对应:默认(账户 0,无前缀 IMAP_*)、1(IMAP1_*)、2(IMAP2_*)...
+- 账户按 .env 的 IMAP1_* / IMAP2_* 编号(编号必须连续),账户名 = 邮箱地址;
+  参数可用编号(1/2/3…)或邮箱地址
 - 读取 .env 里的 IMAP 配置和 custom_sender.py 的推送配置
 - 不改变邮件状态(不会标记已读、不会移动邮件)
 - 与自动推送的差异:不管数据库记录,指定哪封就发哪封
@@ -35,18 +36,21 @@ import custom_sender        # 与根目录的推送脚本共用逻辑(其内部�
 
 
 def _resolve_account(account=None) -> AccountConfig:
-    """账户参数 → AccountConfig。None/''/default/0 → 账户 0;数字 → 编号账户;其他按名字匹配。"""
+    """账户参数 → AccountConfig。支持邮箱地址(精确匹配)或编号(1/2/3…);空 = 第 1 个。"""
     if isinstance(account, AccountConfig):
         return account
     accounts = settings.load_accounts()
-    if account in (None, "", "default", "0"):
+    if not accounts:
+        raise SystemExit("没有配置任何账户:请在 .env 中配置 IMAP1_* / IMAP2_*(编号必须连续)。")
+    if account in (None, ""):
         return accounts[0]
-    if str(account).isdigit() and int(account) < len(accounts):
-        return accounts[int(account)]
+    if str(account).isdigit() and 1 <= int(account) <= len(accounts):
+        return accounts[int(account) - 1]
     for a in accounts:
         if a.name == str(account):
             return a
-    raise SystemExit(f"账户 {account!r} 不存在。可用账户: {', '.join(a.name for a in accounts)}")
+    listing = ", ".join(f"{i + 1} {a.name}" for i, a in enumerate(accounts))
+    raise SystemExit(f"账户 {account!r} 不存在。可用账户: {listing}")
 
 
 def list_recent(count: int = 20, account=None) -> None:
@@ -121,13 +125,12 @@ def send_by_uid(uid: str, account=None) -> int:
 
     ok = True
 
-    # 正文推送决策 + 发送顺序与自动推送一致:文字 → 100ms → 图片/附件
-    need_image, body_text = custom_sender.decide_body(data)
-    if not custom_sender.send_text(data, body_text):
+    # 与自动推送完全一致(含英文翻译 + 正文决策):文字 → 100ms → 图片/附件
+    payload, body_text, render_html = custom_sender.prepare_payload(data)
+    if not custom_sender.send_text(payload, body_text):
         ok = False
-    if need_image or data.get("attachments"):
-        time.sleep(0.1)
-    if need_image and not custom_sender.send_body_image(data):
+    time.sleep(0.1)
+    if not custom_sender.send_body_image(payload, render_html):
         ok = False
     for att in data.get("attachments", []):
         try:
@@ -157,6 +160,10 @@ def main() -> int:
         return send_by_uid(sys.argv[1], sys.argv[2] if len(sys.argv) >= 3 else None)
 
     # 交互模式:发完一封可以继续选择下一封
+    accounts = settings.load_accounts()
+    print("可用账户:")
+    for i, a in enumerate(accounts, 1):
+        print(f"  {i} {a.name}")
     account = _resolve_account(input(f"账户> ").strip() or None)
     print(f"交互模式:账户 {account.name}。输入 UID 发送邮件,list 查看最近邮件,"
           f"info <UID> 查看邮件详情,quit 退出。")

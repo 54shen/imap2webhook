@@ -113,7 +113,7 @@ imap2webhook/
 
 **src/app/config/settings.py — 配置**
 
-启动时读取环境变量并加载 `.env`(如有),`IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` / `CUSTOM_SENDER` 为必填项,缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
+启动时读取环境变量并加载 `.env`(如有),`CUSTOM_SENDER` 与至少一个编号账户(`IMAP1_*`)为必填项,缺失时记录错误日志并直接退出(退出码 1),避免带错配置运行。
 
 **src/app/config/logger.py — 日志**
 
@@ -138,7 +138,7 @@ imap2webhook/
 ```json
 {
   "uid": "1809",
-  "account": "default",
+  "account": "you@yourdomain.com",
   "subject": "Your invoice is ready",
   "from": "billing@example.com",
   "to": "filter@mydomain.com",
@@ -184,7 +184,7 @@ imap2webhook/
 | 字段 | 说明 |
 |------|------|
 | `uid` | 邮件在邮箱中的唯一标识(字符串) |
-| `account` | 来源账户名(`default` / `1` / `2`...,多账户时区分来源) |
+| `account` | 来源账户名(IMAP_USER 邮箱地址,多账户时区分来源) |
 | `subject` | 主题(RFC 2047 已解码,中文正常) |
 | `from` / `to` / `cc` | 发件人 / 收件人 / 抄送 |
 | `reply_to` / `sender` | 回复地址 / 实际发件人(Sender 头) |
@@ -208,12 +208,12 @@ imap2webhook/
 
 | 变量             | 是否必填 | 默认值            | 说明                                        |
 |------------------|----------|-------------------|---------------------------------------------|
-| `IMAP_HOST`      | 是       | —                 | IMAP 服务器主机名                           |
-| `IMAP_PORT`      | 否       | `993`             | IMAP 服务器端口(SSL)                       |
-| `IMAP_USER`      | 是       | —                 | 邮箱地址 / 登录名                           |
-| `IMAP_PWD`       | 是       | —                 | 账户密码                                    |
-| `IMAP_SSL_VERIFY`| 否       | `true`            | 设为 `false` 跳过证书校验(自签名证书)      |
-| `IMAP_TIMEOUT`   | 否       | `30`              | IMAP 连接超时(秒)                          |
+| `IMAP1_HOST`     | 是       | —                 | 账户 1 的 IMAP 服务器主机名(账户全部带编号,从 1 开始) |
+| `IMAP1_PORT`     | 否       | `993`             | IMAP 服务器端口(SSL)                       |
+| `IMAP1_USER`     | 是       | —                 | 邮箱地址 / 登录名(**同时是账户名**)        |
+| `IMAP1_PWD`      | 是       | —                 | 账户密码                                    |
+| `IMAP1_SSL_VERIFY`| 否      | `true`            | 设为 `false` 跳过证书校验(自签名证书)      |
+| `IMAP1_TIMEOUT`  | 否       | `30`              | IMAP 连接超时(秒)                          |
 | `CUSTOM_SENDER`  | 是       | —                 | 自定义推送脚本路径(唯一推送通道,见下文) |
 | `MAILBOX`        | 否       | `INBOX`           | 要监听的邮箱 / 文件夹                       |
 | `PAST_UNSEEN`    | 否       | `false`           | 首次连接时是否转发邮箱中已有的未读邮件       |
@@ -227,29 +227,27 @@ imap2webhook/
 
 ## 多账户(同时监听多个邮箱)
 
-在 `.env` 中把账户配置复制一组、编号 +1,即可同时监听多个邮箱:
+在 `.env` 中把账户配置复制一组、编号 +1,即可同时监听多个邮箱(**账户全部带编号,从 1 开始,无前缀账户不存在**):
 
 ```ini
-# 账户 0(无前缀,默认)— 始终存在,不能删
-IMAP_HOST=imap.exmail.qq.com
-IMAP_USER=xxx@54shen.cn
-IMAP_PWD=xxx
-
-# 账户 1 — IMAP1_* 前缀
-IMAP1_HOST=imap.qq.com
-IMAP1_USER=xxx@qq.com
+# 账户 1 — IMAP1_* 前缀(账户名 = IMAP1_USER 邮箱地址)
+IMAP1_HOST=imap.exmail.qq.com
+IMAP1_USER=xxx@54shen.cn
 IMAP1_PWD=xxx
 IMAP1_MAILBOX=INBOX        # 可选,未配置继承全局默认
 IMAP1_PAST_UNSEEN=false    # 可选,未配置继承全局默认
 
-# 账户 2 — IMAP2_* 前缀,以此类推
+# 账户 2 — 复制一组、编号 +1,以此类推
+IMAP2_HOST=imap.qq.com
+IMAP2_USER=xxx@qq.com
+IMAP2_PWD=xxx
 ```
 
 - **编号必须连续**:有 `IMAP1_*` 没有 `IMAP2_*` 时,`IMAP3_*` 及之后的账户不会被加载
-- 未配置的项继承全局默认值(`IMAP_PORT`/`IMAP_TIMEOUT`/`MAILBOX`/`PAST_UNSEEN`/`ATTACH`/`MAX_ATTACH_MB`)
+- 未配置的项继承无前缀的全局默认值(`IMAP_PORT`/`IMAP_TIMEOUT`/`MAILBOX`/`PAST_UNSEEN`/`ATTACH`/`MAX_ATTACH_MB`)
 - 每个账户**独立线程**监听,互不影响:一个账户断线/登录失败只重试它自己
-- 去重按账户隔离(同一 UID 在不同账户互不干扰),历史记录自动迁移到默认账户
-- 每封邮件的 JSON 负载带 `account` 字段(账户名 `default` / `1` / `2`...),推送脚本可据此区分来源
+- 去重按账户隔离(同一 UID 在不同账户互不干扰);老库历史记录启动时自动迁移(旧名 `default`/`1`/`2` → 新邮箱名,重排 .env 时保持账户顺序)
+- 每封邮件的 JSON 负载带 `account` 字段(**账户名 = 邮箱地址**),推送脚本可据此区分来源;`resend.py` 的账户参数支持编号(1/2/3…)或邮箱
 
 ## 快速开始
 
@@ -265,7 +263,7 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt   # Windows
 .venv/bin/pip install -r requirements.txt       # Linux / macOS
 
-# 2. 复制配置文件模板并填写(必填:IMAP_HOST / IMAP_USER / IMAP_PWD / CUSTOM_SENDER)
+# 2. 复制配置文件模板并填写(必填:IMAP1_HOST / IMAP1_USER / IMAP1_PWD / CUSTOM_SENDER)
 copy .env.example .env                          # Windows
 cp .env.example .env                            # Linux / macOS
 
@@ -301,7 +299,7 @@ cp src/sender/custom_sender.py.example custom_sender.py   # 推送脚本含密�
 mkdir -p data                                            # 数据库目录(logs/ 启动时自动创建)
 ```
 
-- 编辑 `.env`:必填 `IMAP_HOST` / `IMAP_USER` / `IMAP_PWD` / `CUSTOM_SENDER`(`CUSTOM_SENDER` 保持 `./custom_sender.py`,相对 `WorkingDirectory` 解析)
+- 编辑 `.env`:必填 `IMAP1_HOST` / `IMAP1_USER` / `IMAP1_PWD` / `CUSTOM_SENDER`(`CUSTOM_SENDER` 保持 `./custom_sender.py`,相对 `WorkingDirectory` 解析)
 - 编辑 `custom_sender.py`:填 API 密钥(文件头「配置区」),改完**下一封邮件即生效,无需重启服务**
 
 ### 3. 创建 systemd 服务
@@ -350,7 +348,8 @@ journalctl -u imap2webhook -f        # 实时日志
 
 | journalctl 报错 | 原因 | 解决 |
 |---|---|---|
-| `Missing mandatory environment variables: IMAP_HOST, IMAP_USER, IMAP_PWD, CUSTOM_SENDER` | `.env` 未复制或未填写 | `cp .env.example .env` 后填四个必填项,重启 |
+| `Missing mandatory environment variable: CUSTOM_SENDER` | `.env` 未复制或未填写推送脚本路径 | `cp .env.example .env` 后填必填项,重启 |
+| `No IMAP account configured: .env must define IMAP1_HOST...` | `.env` 缺编号账户(IMAP1_* 起) | `.env` 配置 `IMAP1_HOST` / `IMAP1_USER` / `IMAP1_PWD` |
 | `CUSTOM_SENDER file not found: ./custom_sender.py` | 根目录缺推送脚本,或放到了 `src/` 下 | `cp src/sender/custom_sender.py.example custom_sender.py` 并填密钥,必须放项目根目录 |
 | `unable to open database file` | `data/` 目录不存在 | `mkdir -p data`,重启 |
 

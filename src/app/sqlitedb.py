@@ -4,7 +4,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 class SqliteDb:
-    def __init__(self, db_path, account: str = "default"):
+    def __init__(self, db_path, account: str = ""):
         self.account = account
         # timeout:多账户线程同时写库时的忙等待上限(避免 database is locked)
         self.conn = sqlite3.connect(db_path, timeout=5)
@@ -76,3 +76,29 @@ class SqliteDb:
             (key, value),
         )
         self.conn.commit()
+
+    @staticmethod
+    def migrate_account_names(db_path, mapping: dict[str, str]) -> bool:
+        """老账户名(default/1/2…) → 新邮箱名。须在 worker 线程前调用(主线程建连接)。
+        mapping = {旧账户名: 新邮箱};幂等:无匹配行时 UPDATE 无效果,重复执行无害。
+        返回是否实际迁移了数据(供调用方决定是否打日志)。"""
+        if not mapping:
+            return False
+        conn = sqlite3.connect(db_path, timeout=5)
+        changed = False
+        try:
+            for old, new in mapping.items():
+                if old == new:
+                    continue
+                cur = conn.execute(
+                    "UPDATE email_uids SET account = ? WHERE account = ?", (new, old))
+                changed = changed or cur.rowcount > 0
+                cur = conn.execute(
+                    "UPDATE meta SET key = ? WHERE key = ?",
+                    (f"{new}:uidvalidity", f"{old}:uidvalidity"),
+                )
+                changed = changed or cur.rowcount > 0
+            conn.commit()
+        finally:
+            conn.close()
+        return changed
